@@ -22,24 +22,50 @@ except ImportError:
 
 app = FastAPI(title="LMS ML Pipeline API")
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 
 # ---------------------------------------------------------------
-# Load models once at cold start (reused across warm invocations)
+# Load models once at cold start (reused across warm invocations).
+# Triage and grading load independently so a failure in one
+# (e.g. a missing/incompatible model file) doesn't take the other down.
 # ---------------------------------------------------------------
 _state = {}
 
 
-def _load():
-    if _state:
-        return _state
-    with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
-        _state["metadata"] = json.load(f)
-    _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model_v5.joblib"))
-    _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
-    _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
-    _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
-    _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
+def _load_metadata():
+    if "metadata" not in _state:
+        with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
+            _state["metadata"] = json.load(f)
+    return _state["metadata"]
+
+
+def _load_triage():
+    """Load only what /api/triage needs, independent of the grading model."""
+    if "vec" not in _state:
+        _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
+        _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
+        _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
+    _load_metadata()
+    return _state
+
+
+def _load_grading():
+    """Load only what /api/grade needs, independent of the triage models.
+
+    grading_model_v5.joblib bundles everything the grading pipeline needs
+    into a single dict artifact: {model, imputer, feature_cols,
+    final_feature_idx, winner_name} -- this keeps the feature schema and
+    the final-feature selection tied to the exact model that was trained
+    on them, so there's no separate metadata file to drift out of sync.
+    """
+    if "grading_artifact" not in _state:
+        artifact = joblib.load(os.path.join(MODELS_DIR, "grading_model_v5.joblib"))
+        _state["grading_artifact"] = artifact
+        _state["grading_model"] = artifact["model"]
+        _state["grading_imputer"] = artifact["imputer"]
+        _state["grading_feature_cols"] = artifact["feature_cols"]
+        _state["grading_final_feature_idx"] = artifact["final_feature_idx"]
+        _state["grading_model_name"] = artifact["winner_name"]
     return _state
 
 
@@ -71,7 +97,8 @@ class GradeResponse(BaseModel):
 
 
 # ---------------------------------------------------------------
-# Feature helpers (mirror the notebook's feature engineering)
+# Feature helpers (mirror the notebook's feature engineering /
+# extract_code_features + the derived-feature step from training)
 # ---------------------------------------------------------------
 def _cyclomatic_complexity(code: str) -> float:
     try:
@@ -90,7 +117,8 @@ def _lines_of_code(code: str) -> float:
 
 def _code_structural_features(code: str) -> dict:
     """Cheap stand-ins for the dataset's own def_count / total_tokens / has_docstring,
-    computed directly from the submitted code at inference time."""
+    computed directly from the submitted code at inference time -- callers only
+    need to send raw code, not pre-computed structural features."""
     def_count = code.count("def ")
     total_tokens = len(code.split())
     has_docstring = int('"""' in code or "'''" in code)
@@ -124,7 +152,7 @@ def health():
 
 @app.post("/api/triage", response_model=TriageResponse)
 def triage(req: TriageRequest):
-    state = _load()
+    state = _load_triage()
     X_txt = state["vec"].transform([req.post_text])
 
     predicted_topic = state["topic_clf"].predict(X_txt)[0]
@@ -144,8 +172,10 @@ def grade(req: GradeRequest):
     if not RADON_AVAILABLE:
         raise HTTPException(500, "radon not installed on server")
 
-    state = _load()
-    meta = state["metadata"]
+    try:
+        state = _load_grading()
+    except Exception as e:
+        raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
 
     complexity = _cyclomatic_complexity(req.code)
     loc = _lines_of_code(req.code)
@@ -160,14 +190,26 @@ def grade(req: GradeRequest):
         "cyclomatic_complexity": complexity,
         "lines_of_code": loc,
     }
-    X = np.array([[row[c] for c in meta["grading_feature_cols"]]], dtype=float)
-    X_imputed = state["grading_imputer"].transform(X)
+    # Derived features -- must match the training notebook's feature
+    # engineering exactly, since feature_cols/final_feature_idx were fit
+    # against these exact derived columns.
+    row["tokens_per_def"] = row["total_tokens"] / (row["def_count"] + 1)
+    row["complexity_per_line"] = row["cyclomatic_complexity"] / ((row["lines_of_code"] or 0) + 1)
 
-    pred = float(state["grading_model"].predict(X_imputed)[0])
+    feature_cols = state["grading_feature_cols"]
+    final_feature_idx = state["grading_final_feature_idx"]
+
+    try:
+        x = np.array([[row[c] for c in feature_cols]], dtype=float)
+    except KeyError as e:
+        raise HTTPException(500, f"Feature schema mismatch -- missing column {e} in computed features")
+
+    x_imputed = state["grading_imputer"].transform(x)[:, final_feature_idx]
+    pred = float(state["grading_model"].predict(x_imputed)[0])
 
     return GradeResponse(
         predicted_quality_score=round(pred, 4),
-        model_used=meta["grading_model_name"],
+        model_used=state["grading_model_name"],
         cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
         lines_of_code=None if np.isnan(loc) else loc,
     )
