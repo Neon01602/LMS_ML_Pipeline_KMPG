@@ -100,12 +100,18 @@ class GradeResponse(BaseModel):
 # Feature helpers (mirror the notebook's feature engineering /
 # extract_code_features + the derived-feature step from training)
 # ---------------------------------------------------------------
-def _cyclomatic_complexity(code: str) -> float:
+def _complexity_stats(code: str) -> dict:
+    """Returns both mean and max cyclomatic complexity across all blocks
+    (functions/methods) in the submitted code."""
     try:
         blocks = cc_visit(code)
-        return float(np.mean([b.complexity for b in blocks])) if blocks else 1.0
+        complexities = [b.complexity for b in blocks] if blocks else [1.0]
+        return {
+            "cyclomatic_complexity": float(np.mean(complexities)),
+            "max_complexity": float(np.max(complexities)),
+        }
     except Exception:
-        return float("nan")
+        return {"cyclomatic_complexity": float("nan"), "max_complexity": float("nan")}
 
 
 def _lines_of_code(code: str) -> float:
@@ -177,7 +183,9 @@ def grade(req: GradeRequest):
     except Exception as e:
         raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
 
-    complexity = _cyclomatic_complexity(req.code)
+    complexity_stats = _complexity_stats(req.code)
+    complexity = complexity_stats["cyclomatic_complexity"]
+    max_complexity = complexity_stats["max_complexity"]
     loc = _lines_of_code(req.code)
     struct = _code_structural_features(req.code)
 
@@ -188,6 +196,7 @@ def grade(req: GradeRequest):
         "def_count": struct["def_count"],
         "has_docstring": struct["has_docstring"],
         "cyclomatic_complexity": complexity,
+        "max_complexity": max_complexity,
         "lines_of_code": loc,
     }
     # Derived features -- must match the training notebook's feature
@@ -199,10 +208,16 @@ def grade(req: GradeRequest):
     feature_cols = state["grading_feature_cols"]
     final_feature_idx = state["grading_final_feature_idx"]
 
-    try:
-        x = np.array([[row[c] for c in feature_cols]], dtype=float)
-    except KeyError as e:
-        raise HTTPException(500, f"Feature schema mismatch -- missing column {e} in computed features")
+    missing = [c for c in feature_cols if c not in row]
+    if missing:
+        raise HTTPException(
+            500,
+            f"Feature schema mismatch -- missing columns {missing} in computed "
+            f"features. Currently computed: {sorted(row.keys())}. "
+            f"Model expects: {feature_cols}",
+        )
+
+    x = np.array([[row[c] for c in feature_cols]], dtype=float)
 
     x_imputed = state["grading_imputer"].transform(x)[:, final_feature_idx]
     pred = float(state["grading_model"].predict(x_imputed)[0])
