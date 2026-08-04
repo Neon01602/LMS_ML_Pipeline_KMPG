@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 try:
     from radon.complexity import cc_visit
     from radon.raw import analyze
+    from radon.metrics import h_visit, mi_visit
     RADON_AVAILABLE = True
 except ImportError:
     RADON_AVAILABLE = False
@@ -121,6 +122,53 @@ def _lines_of_code(code: str) -> float:
         return float("nan")
 
 
+def _full_code_metrics(code: str) -> dict:
+    """Computes every remaining feature_cols entry not already covered by
+    _complexity_stats / _lines_of_code / _code_structural_features:
+    raw line-count breakdown (radon.raw), Halstead metrics and
+    maintainability index (radon.metrics), and a parse_failed flag.
+
+    If the code doesn't parse (syntax error, truncated snippet, etc.), all
+    numeric fields come back as NaN so the saved imputer fills them in --
+    the same "failed-to-parse is itself informative" approach used in the
+    training notebook -- and parse_failed is set to 1.
+    """
+    nan_result = {
+        "logical_lines": float("nan"),
+        "comment_lines": float("nan"),
+        "comment_ratio": float("nan"),
+        "blank_lines": float("nan"),
+        "blank_ratio": float("nan"),
+        "halstead_volume": float("nan"),
+        "halstead_difficulty": float("nan"),
+        "halstead_effort": float("nan"),
+        "maintainability_index": float("nan"),
+        "parse_failed": 1,
+    }
+    try:
+        raw = analyze(code)
+        loc = raw.loc or 1  # avoid div-by-zero; loc is already computed separately too
+        comment_lines = raw.comments + raw.single_comments
+
+        h = h_visit(code).total
+        mi = mi_visit(code, True)
+
+        return {
+            "logical_lines": float(raw.lloc),
+            "comment_lines": float(comment_lines),
+            "comment_ratio": float(comment_lines) / loc,
+            "blank_lines": float(raw.blank),
+            "blank_ratio": float(raw.blank) / loc,
+            "halstead_volume": float(h.volume),
+            "halstead_difficulty": float(h.difficulty),
+            "halstead_effort": float(h.effort),
+            "maintainability_index": float(mi),
+            "parse_failed": 0,
+        }
+    except Exception:
+        return nan_result
+
+
 def _code_structural_features(code: str) -> dict:
     """Cheap stand-ins for the dataset's own def_count / total_tokens / has_docstring,
     computed directly from the submitted code at inference time -- callers only
@@ -188,6 +236,7 @@ def grade(req: GradeRequest):
     max_complexity = complexity_stats["max_complexity"]
     loc = _lines_of_code(req.code)
     struct = _code_structural_features(req.code)
+    full_metrics = _full_code_metrics(req.code)
 
     row = {
         "pass_rate": req.pass_rate if req.pass_rate is not None else np.nan,
@@ -198,6 +247,7 @@ def grade(req: GradeRequest):
         "cyclomatic_complexity": complexity,
         "max_complexity": max_complexity,
         "lines_of_code": loc,
+        **full_metrics,
     }
     # Derived features -- must match the training notebook's feature
     # engineering exactly, since feature_cols/final_feature_idx were fit
