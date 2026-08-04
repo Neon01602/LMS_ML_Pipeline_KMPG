@@ -12,9 +12,7 @@ from typing import Optional
 import joblib
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from lgbm_interpreter import PurePythonLGBM
 from pydantic import BaseModel, Field
-from scipy.sparse import hstack
 
 try:
     from radon.complexity import cc_visit
@@ -39,36 +37,22 @@ def _load_metadata():
 
 
 def _load_triage():
-    if "vec" not in _state:
-        _state["vec"] = joblib.load(
-            os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl")
-        )
-        _state["topic_clf"] = joblib.load(
-            os.path.join(MODELS_DIR, "topic_classifier.pkl")
-        )
-        _state["urgency_clf"] = joblib.load(
-            os.path.join(MODELS_DIR, "urgency_classifier.pkl")
+    if "triage_bundle" not in _state:
+        _state["triage_bundle"] = joblib.load(
+            os.path.join(MODELS_DIR, "triage_models.joblib")
         )
     _load_metadata()
     return _state
 
 
 def _load_grading():
-    if "grading_engine" not in _state:
-        tree_path = os.path.join(MODELS_DIR, "lgbm_model_trees.json")
-        vectorizer_path = os.path.join(MODELS_DIR, "tfidf_and_features.joblib")
-
-        if not os.path.exists(tree_path) or not os.path.exists(vectorizer_path):
+    if "grading_bundle" not in _state:
+        model_path = os.path.join(MODELS_DIR, "grading_model.joblib")
+        if not os.path.exists(model_path):
             raise FileNotFoundError(
-                f"Missing model files in {MODELS_DIR}. Check deployment bundle."
+                f"Missing model file {model_path} in {MODELS_DIR}. Check deployment bundle."
             )
-
-        _state["grading_engine"] = PurePythonLGBM(tree_path)
-        feature_artifacts = joblib.load(vectorizer_path)
-
-        _state["tfidf_char"] = feature_artifacts["tfidf_char"]
-        _state["tfidf_word"] = feature_artifacts["tfidf_word"]
-
+        _state["grading_bundle"] = joblib.load(model_path)
     return _state
 
 
@@ -78,15 +62,18 @@ def _clean_code(text: str) -> str:
     return re.sub(r"\n?```$", "", text).strip()
 
 
-def _extract_ast_and_surface_features(
+def _extract_features(
     code_str: str,
     pass_rate: Optional[float] = None,
     test_count: Optional[int] = None,
-):
-    """Reconstructs the numerical feature vector matching model training."""
-    pass_val = pass_rate if pass_rate is not None else 0.5
-    tests_val = float(test_count) if test_count is not None else 0.0
-
+    runtime_ms: Optional[float] = None,
+    memory_kb: Optional[float] = None,
+    comment_density: Optional[float] = None,
+    num_attempts: Optional[float] = None,
+    hours_before_deadline: Optional[float] = None,
+    student_avg_past_score: Optional[float] = None,
+) -> pd.DataFrame:
+    """Extracts features matching the training dataframe structure expected by grading_model.joblib."""
     try:
         tree = ast.parse(code_str)
         ast_nodes = list(ast.walk(tree))
@@ -143,7 +130,7 @@ def _extract_ast_and_surface_features(
     has_docstring = float(int('"""' in code_str or "'''" in code_str))
     avg_line_len = char_len / lines
     comment_count = float(len(re.findall(r"#.*", code_str)))
-    comment_density = comment_count / lines
+    calc_comment_density = comment_density if comment_density is not None else (comment_count / lines)
     indent_spaces = float(len(re.findall(r"^[ ]+", code_str, re.MULTILINE)))
     operator_count = float(
         len(re.findall(r"[\+\-\*\/\%\=\<\>\!\&\|\^\~]", code_str))
@@ -152,58 +139,46 @@ def _extract_ast_and_surface_features(
     ast_density = node_count / lines
     complexity_density = cyclomatic / max(1.0, node_count)
 
-    # Return dense numerical vector matching feature order
-    # Note: Adjusted index order for the first 15 features to align with the LightGBM model metadata:
-    # 0: test_pass_rate, 1: cyclomatic_complexity, 2: lines_of_code, 3: num_functions, 
-    # 4: runtime_ms, 5: memory_kb, 6: num_compile_errors, 7: num_warnings, 
-    # 8: comment_density, 9: num_attempts, 10: hours_before_deadline, 11: student_avg_past_score, 
-    # 12: runtime_ms_missing, 13: memory_kb_missing, 14: comment_density_missing
-    num_feats = [
-        pass_val,               # 0: test_pass_rate
-        cyclomatic,             # 1: cyclomatic_complexity
-        lines,                  # 2: lines_of_code
-        def_count,              # 3: num_functions
-        0.0,                    # 4: runtime_ms (default)
-        1000.0,                 # 5: memory_kb (default)
-        0.0,                    # 6: num_compile_errors
-        0.0,                    # 7: num_warnings
-        comment_density,        # 8: comment_density
-        1.0,                    # 9: num_attempts
-        24.0,                   # 10: hours_before_deadline
-        80.0,                   # 11: student_avg_past_score
-        1.0,                    # 12: runtime_ms_missing
-        1.0,                    # 13: memory_kb_missing
-        0.0,                    # 14: comment_density_missing
-        # Extended auxiliary features beyond max_feature_idx=14
-        has_docstring,
-        char_len,
-        avg_line_len,
-        comment_count,
-        indent_spaces,
-        operator_count,
-        operator_density,
-        syntax_valid,
-        node_count,
-        class_count,
-        loop_count,
-        try_count,
-        if_count,
-        return_count,
-        assign_count,
-        type_ann_count,
-        comp_count,
-        single_char_ratio,
-        ast_density,
-        complexity_density,
-    ]
-    return np.array([num_feats], dtype=float)
-      
-def calibrate_score(raw_score: float) -> float:
-  """Applies a post-processing calibration factor to the predicted score
-  to better align with ground truth expectations.
-  """
-  adjusted = raw_score * 1.15  # Example 15% upward shift for testing
-  return float(np.clip(adjusted, 0.0, 1.0))
+    features_dict = {
+        "test_pass_rate": pass_rate if pass_rate is not None else 0.5,
+        "cyclomatic_complexity": cyclomatic,
+        "lines_of_code": lines,
+        "num_functions": def_count,
+        "runtime_ms": runtime_ms,
+        "memory_kb": memory_kb,
+        "num_compile_errors": 0.0,
+        "num_warnings": 0.0,
+        "comment_density": calc_comment_density,
+        "num_attempts": num_attempts if num_attempts is not None else 1.0,
+        "hours_before_deadline": hours_before_deadline if hours_before_deadline is not None else 24.0,
+        "student_avg_past_score": student_avg_past_score if student_avg_past_score is not None else 80.0,
+        "runtime_ms_missing": 1.0 if runtime_ms is None else 0.0,
+        "memory_kb_missing": 1.0 if memory_kb is None else 0.0,
+        "comment_density_missing": 1.0 if comment_density is None else 0.0,
+        "has_docstring": has_docstring,
+        "char_len": char_len,
+        "avg_line_len": avg_line_len,
+        "comment_count": comment_count,
+        "indent_spaces": indent_spaces,
+        "operator_count": operator_count,
+        "operator_density": operator_density,
+        "syntax_valid": syntax_valid,
+        "node_count": node_count,
+        "class_count": class_count,
+        "loop_count": loop_count,
+        "try_count": try_count,
+        "if_count": if_count,
+        "return_count": return_count,
+        "assign_count": assign_count,
+        "type_ann_count": type_ann_count,
+        "comp_count": comp_count,
+        "single_char_ratio": single_char_ratio,
+        "ast_density": ast_density,
+        "complexity_density": complexity_density,
+    }
+
+    return pd.DataFrame([features_dict])
+
 
 class TriageRequest(BaseModel):
     post_text: str = Field(..., description="Raw text of student doubt")
@@ -220,6 +195,12 @@ class GradeRequest(BaseModel):
     code: str = Field(..., description="Source code submission to grade")
     pass_rate: Optional[float] = Field(None)
     test_count: Optional[int] = Field(None)
+    runtime_ms: Optional[float] = Field(None)
+    memory_kb: Optional[float] = Field(None)
+    comment_density: Optional[float] = Field(None)
+    num_attempts: Optional[float] = Field(None)
+    hours_before_deadline: Optional[float] = Field(None)
+    student_avg_past_score: Optional[float] = Field(None)
 
 
 class GradeResponse(BaseModel):
@@ -243,15 +224,19 @@ def health():
 @app.post("/api/triage", response_model=TriageResponse)
 def triage(req: TriageRequest):
     state = _load_triage()
-    X_txt = state["vec"].transform([req.post_text])
-    predicted_topic = state["topic_clf"].predict(X_txt)[0]
-    urgency_proba = float(state["urgency_clf"].predict_proba(X_txt)[0, 1])
-    threshold = state["metadata"]["urgency_threshold"]
+    triage_bundle = state["triage_bundle"]
+    topic_model = triage_bundle["topic_model"]
+    urgency_model = triage_bundle["urgency_model"]
+    threshold = triage_bundle["confidence_threshold"]
+
+    predicted_topic = topic_model.predict([req.post_text])[0]
+    urg_proba = urgency_model.predict_proba([req.post_text])[0]
+    max_urgency_proba = float(urg_proba.max())
 
     return TriageResponse(
         predicted_topic=predicted_topic,
-        urgency_probability=round(urgency_proba, 4),
-        auto_handle=urgency_proba < threshold,
+        urgency_probability=round(max_urgency_proba, 4),
+        auto_handle=max_urgency_proba >= threshold,
         threshold_used=threshold,
     )
 
@@ -265,52 +250,56 @@ def grade(req: GradeRequest):
             500, f"Grading initialization failed: {type(e).__name__}: {e}"
         )
 
+    bundle = state["grading_bundle"]
+    model = bundle["model"]
+    feature_cols = bundle["feature_cols"]
+    imputer = bundle["imputer"]
+    numeric_with_na = bundle["numeric_with_na"]
+
     clean_code_str = _clean_code(req.code)
 
-    # 1. Extract numerical AST and surface features matching feature indices
-    X_num = _extract_ast_and_surface_features(
-        clean_code_str, req.pass_rate, req.test_count
+    df_feats = _extract_features(
+        code_str=clean_code_str,
+        pass_rate=req.pass_rate,
+        test_count=req.test_count,
+        runtime_ms=req.runtime_ms,
+        memory_kb=req.memory_kb,
+        comment_density=req.comment_density,
+        num_attempts=req.num_attempts,
+        hours_before_deadline=req.hours_before_deadline,
+        student_avg_past_score=req.student_avg_past_score,
     )
 
-    computed_lines = float(X_num[0, 2])
-    computed_complexity = float(X_num[0, 1])
+    # Impute missing values exactly as done during training pipeline
+    for col in numeric_with_na:
+        if col not in df_feats.columns:
+            df_feats[col] = np.nan
 
-    # 2. Extract TF-IDF features
-    X_char = state["tfidf_char"].transform([clean_code_str])
-    X_word = state["tfidf_word"].transform([clean_code_str])
+    df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
 
-    # 3. Stack features into a single sparse array
-    X_combined = hstack([X_num, X_char, X_word]).tocsr()
-    dense_features = X_combined.toarray().ravel()
+    # Reorder columns to match model expectations
+    X_input = df_feats[feature_cols]
 
-    # 4. Pad array if total feature count is less than 1028
-    REQUIRED_FEATURES = 1028
-    if len(dense_features) < REQUIRED_FEATURES:
-        padding = np.zeros(REQUIRED_FEATURES - len(dense_features))
-        dense_features = np.concatenate([dense_features, padding])
+    raw_predicted_score = float(model.predict(X_input)[0])
+    final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
 
-    # 5. Predict raw quality score
-    raw_predicted_score = state["grading_engine"].predict_one(dense_features)
+    computed_complexity = float(df_feats["cyclomatic_complexity"].iloc[0])
+    computed_lines = float(df_feats["lines_of_code"].iloc[0])
 
-    # 6. Apply your custom tweaking/calibration logic here
-    final_score = calibrate_score(raw_predicted_score)
-
-    # 7. Fallback or Radon metrics computation with safe defaults
-    complexity, loc = computed_complexity, computed_lines
     if RADON_AVAILABLE:
         try:
             blocks = cc_visit(req.code)
             if blocks:
-                complexity = round(float(np.mean([b.complexity for b in blocks])), 2)
+                computed_complexity = round(float(np.mean([b.complexity for b in blocks])), 2)
             analysis = analyze(req.code)
             if analysis:
-                loc = float(analysis.loc)
+                computed_lines = float(analysis.loc)
         except Exception:
             pass
 
     return GradeResponse(
         predicted_quality_score=round(final_score, 4),
-        model_used="Pure_Python_LightGBM_Tree_Interpreter",
-        cyclomatic_complexity=complexity,
-        lines_of_code=loc,
+        model_used="Joblib_Grading_Model",
+        cyclomatic_complexity=computed_complexity,
+        lines_of_code=computed_lines,
     )
