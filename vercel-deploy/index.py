@@ -90,7 +90,7 @@ def _extract_features(
     num_attempts: Optional[float] = None,
     hours_before_deadline: Optional[float] = None,
     student_avg_past_score: Optional[float] = None,
-) -> dict:
+) -> dict:  # <--- THIS IS THE CRITICAL LINE. IT MUST BE `dict`, NOT `pd.DataFrame`
     """Extracts features as a raw dictionary matching training parameters."""
     try:
         tree = ast.parse(code_str)
