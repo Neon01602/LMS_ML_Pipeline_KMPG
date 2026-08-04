@@ -68,41 +68,51 @@ class PurePythonLGBMRegressor:
         # Base score (init_score)
         self.base_score = float(data.get("model_info", {}).get("min_data_per_group", 0.0))
 
-    def _predict_tree(self, node: dict, x: list) -> float:
+    def _predict_tree(self, node: dict, feature_values: np.ndarray) -> float:
         if "leaf_value" in node:
             return float(node["leaf_value"])
-        
-        feature_idx = int(node.get("split_feature", 0))
-        threshold = float(node.get("threshold", 0.0))
-        
-        val = x[feature_idx] if feature_idx < len(x) else 0.0
-        if val is None or np.isnan(val):
-            val = 0.0
 
-        default_left = node.get("default_left", True)
-        if np.isnan(val):
-            goes_left = default_left
+        feat_idx = int(node.get("split_feature", 0))
+
+        if feat_idx < len(feature_values):
+            val = feature_values[feat_idx]
         else:
-            # LightGBM comparison logic
-            decision_type = node.get("decision_type", "<=")
-            if decision_type == "<=":
-                goes_left = val <= threshold
-            else:
-                goes_left = val <= threshold
+            val = np.nan
 
-        if goes_left and "left_child" in node:
-            return self._predict_tree(node["left_child"], x)
-        elif not goes_left and "right_child" in node:
-            return self._predict_tree(node["right_child"], x)
+        threshold = float(node.get("threshold", 0.0))
+        default_left = node.get("default_left", True)
+
+        if np.isnan(val):
+            next_node = (
+                node["left_child"] if default_left else node["right_child"]
+            )
+        else:
+            decision_type = node.get("decision_type", "<=")
+            if decision_type == "<=" or decision_type == 2:
+                is_left = val <= threshold
+            else:
+                is_left = val == threshold
+
+            next_node = (
+                node["left_child"] if is_left else node["right_child"]
+            )
+
+        if next_node:
+            return self._predict_tree(next_node, feature_values)
         return 0.0
 
     def predict(self, X):
         predictions = []
         for x in X:
-            pred = self.base_score
+            if hasattr(x, "toarray"):
+                x = x.toarray().ravel()
+            x_arr = np.asarray(x, dtype=float)
+            
+            total_score = self.base_score
             for tree in self.trees:
-                pred += self._predict_tree(tree, x)
-            predictions.append(pred)
+                total_score += self._predict_tree(tree, x_arr)
+            
+            predictions.append(float(np.clip(total_score, 0.0, 1.0)))
         return np.array(predictions)
 
 
