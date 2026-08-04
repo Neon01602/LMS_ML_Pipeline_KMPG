@@ -265,18 +265,29 @@ def grade(req: GradeRequest):
         padding = np.zeros(REQUIRED_FEATURES - len(dense_features))
         dense_features = np.concatenate([dense_features, padding])
 
-    # 5. Predict score
+    # 5. Predict quality score
     predicted_score = state["grading_engine"].predict_one(dense_features)
 
+    # 6. Extract Radon Code Complexity Metrics
     complexity, loc = None, None
     if RADON_AVAILABLE:
+        # Cyclomatic Complexity
         try:
             blocks = cc_visit(req.code)
-            complexities = [b.complexity for b in blocks] if blocks else [1.0]
-            complexity = round(float(np.mean(complexities)), 2)
-            loc = float(analyze(req.code).loc)
+            if blocks:
+                complexities = [b.complexity for b in blocks]
+                complexity = round(float(np.mean(complexities)), 2)
+            else:
+                complexity = 1.0
         except Exception:
-            pass
+            complexity = None
+
+        # Lines of Code (LOC)
+        try:
+            analysis = analyze(req.code)
+            loc = float(analysis.loc)
+        except Exception:
+            loc = None
 
     return GradeResponse(
         predicted_quality_score=round(predicted_score, 4),
