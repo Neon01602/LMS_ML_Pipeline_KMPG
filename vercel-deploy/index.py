@@ -35,7 +35,7 @@ def _load():
         return _state
     with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
         _state["metadata"] = json.load(f)
-    _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model.pkl"))
+    _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model_v5.joblib"))
     _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
     _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
     _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
