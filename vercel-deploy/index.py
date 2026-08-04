@@ -281,8 +281,8 @@ def grade(req: GradeRequest):
                 complexity = 1.0
         except Exception:
             complexity = None
-
-        # Lines of Code (LOC)
+    
+        # Lines of Code
         try:
             analysis = analyze(req.code)
             loc = float(analysis.loc)
