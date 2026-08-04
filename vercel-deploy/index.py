@@ -1,6 +1,6 @@
 """
 FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function using split JSON/Joblib artifacts.
+Runs as a single Vercel Python serverless function using pure-Python LightGBM JSON tree evaluation.
 """
 
 import ast
@@ -9,18 +9,8 @@ import os
 import re
 from typing import Optional
 
-# CRITICAL: Prevent LightGBM from trying to load missing system OpenMP shared libraries on Vercel
-os.environ["LGB_VERBOSITY"] = "-1"
-os.environ["OMP_NUM_THREADS"] = "1"
-
 import joblib
 import numpy as np
-
-try:
-    import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
-except OSError:
-    LIGHTGBM_AVAILABLE = False
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -60,9 +50,64 @@ def _load_triage():
     return _state
 
 
+class PurePythonLGBMRegressor:
+    """Evaluates a LightGBM model directly from its JSON structure without C binaries."""
+    def __init__(self, json_path: str):
+        with open(json_path, "r") as f:
+            data = json.load(f)
+        
+        self.objective = data.get("objective", "regression")
+        self.average_output = data.get("average_output", False)
+        self.trees = []
+        
+        # Parse tree models from JSON
+        if "tree_info" in data:
+            for t_info in data["tree_info"]:
+                self.trees.append(t_info.get("tree_structure"))
+        
+        # Base score (init_score)
+        self.base_score = float(data.get("model_info", {}).get("min_data_per_group", 0.0))
+
+    def _predict_tree(self, node: dict, x: list) -> float:
+        if "leaf_value" in node:
+            return float(node["leaf_value"])
+        
+        feature_idx = int(node.get("split_feature", 0))
+        threshold = float(node.get("threshold", 0.0))
+        
+        val = x[feature_idx] if feature_idx < len(x) else 0.0
+        if val is None or np.isnan(val):
+            val = 0.0
+
+        default_left = node.get("default_left", True)
+        if np.isnan(val):
+            goes_left = default_left
+        else:
+            # LightGBM comparison logic
+            decision_type = node.get("decision_type", "<=")
+            if decision_type == "<=":
+                goes_left = val <= threshold
+            else:
+                goes_left = val <= threshold
+
+        if goes_left and "left_child" in node:
+            return self._predict_tree(node["left_child"], x)
+        elif not goes_left and "right_child" in node:
+            return self._predict_tree(node["right_child"], x)
+        return 0.0
+
+    def predict(self, X):
+        predictions = []
+        for x in X:
+            pred = self.base_score
+            for tree in self.trees:
+                pred += self._predict_tree(tree, x)
+            predictions.append(pred)
+        return np.array(predictions)
+
+
 def _load_grading():
-    global lgb  # Ensures global lightgbm reference is correctly accessed inside function scope
-    if "grading_grading_bundle" not in _state and "grading_bundle" not in _state:
+    if "grading_bundle" not in _state:
         json_path = os.path.join(MODELS_DIR, "lgbm_model.json")
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
 
@@ -71,17 +116,11 @@ def _load_grading():
                 f"Missing grading files in {MODELS_DIR}. Ensure lgbm_model.json and grading_artifacts.joblib are present."
             )
 
-        with open(json_path, "r") as f:
-            model_str = f.read()
-        
-        try:
-            booster = lgb.Booster(model_str=model_str)
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize LightGBM Booster from JSON: {e}")
-
+        model = PurePythonLGBMRegressor(json_path)
         artifacts = joblib.load(artifacts_path)
+        
         _state["grading_bundle"] = {
-            "model": booster,
+            "model": model,
             "feature_cols": artifacts["feature_cols"],
             "imputer": artifacts["imputer"],
             "numeric_with_na": artifacts["numeric_with_na"],
