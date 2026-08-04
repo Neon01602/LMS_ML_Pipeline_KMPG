@@ -50,24 +50,51 @@ def _load_triage():
     return _state
 
 
-def _load_grading():
-    """Load only what /api/grade needs, independent of the triage models.
+import re
+from scipy.sparse import hstack
 
-    grading_model_v5.joblib bundles everything the grading pipeline needs
-    into a single dict artifact: {model, imputer, feature_cols,
-    final_feature_idx, winner_name} -- this keeps the feature schema and
-    the final-feature selection tied to the exact model that was trained
-    on them, so there's no separate metadata file to drift out of sync.
-    """
+# ---------------------------------------------------------------
+# Updated Artifact Loader
+# ---------------------------------------------------------------
+def _load_grading():
+    """Load the new TF-IDF + XGBoost grading artifact."""
     if "grading_artifact" not in _state:
-        artifact = joblib.load(os.path.join(MODELS_DIR, "grading_model_v5.joblib"))
+        artifact = joblib.load(os.path.join(MODELS_DIR, "code_grading_classifier_v2.joblib"))
         _state["grading_artifact"] = artifact
         _state["grading_model"] = artifact["model"]
-        _state["grading_imputer"] = artifact["imputer"]
-        _state["grading_feature_cols"] = artifact["feature_cols"]
-        _state["grading_final_feature_idx"] = artifact["final_feature_idx"]
-        _state["grading_model_name"] = artifact["winner_name"]
+        _state["tfidf_char"] = artifact["tfidf_char"]
+        _state["tfidf_word"] = artifact["tfidf_word"]
+        _state["target_map"] = artifact["target_map"]
+        # Reverse map to convert class predictions [0, 1, 2] -> [15.1, 15.2, 15.3]
+        _state["rev_target_map"] = {v: k for k, v in artifact["target_map"].items()}
     return _state
+
+# Helper to clean code fences before TF-IDF extraction
+def _clean_code(text: str) -> str:
+    text = str(text).strip()
+    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+    return re.sub(r"\n?```$", "", text).strip()
+
+# Helper to extract the exact numerical features expected by V2 model
+def _extract_v2_num_features(clean_code_str: str, raw_code: str) -> np.ndarray:
+    code_len = len(clean_code_str)
+    line_count = clean_code_str.count("\n") + 1
+    has_docstring = int('"""' in raw_code or "'''" in raw_code)
+    
+    if_count = len(re.findall(r"\bif\b", clean_code_str))
+    for_count = len(re.findall(r"\bfor\b", clean_code_str))
+    while_count = len(re.findall(r"\bwhile\b", clean_code_str))
+    try_count = len(re.findall(r"\btry\b", clean_code_str))
+    return_count = len(re.findall(r"\breturn\b", clean_code_str))
+    
+    indent_lengths = [len(line) - len(line.lstrip(" ")) for line in clean_code_str.split("\n")]
+    max_indent = max(indent_lengths) if indent_lengths else 0
+
+    return np.array([[
+        has_docstring, code_len, line_count, if_count,
+        for_count, while_count, try_count, return_count, max_indent
+    ]], dtype=float)
+
 
 
 # ---------------------------------------------------------------
@@ -215,65 +242,48 @@ def triage(req: TriageRequest):
     )
 
 
+# ---------------------------------------------------------------
+# Updated Grade Endpoint
+# ---------------------------------------------------------------
 @app.post("/api/grade", response_model=GradeResponse)
 def grade(req: GradeRequest):
-    if not RADON_AVAILABLE:
-        raise HTTPException(500, "radon not installed on server")
-
     try:
         state = _load_grading()
     except Exception as e:
         raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
 
-    complexity_stats = _complexity_stats(req.code)
-    complexity = complexity_stats["cyclomatic_complexity"]
-    max_complexity = complexity_stats["max_complexity"]
-    loc = _lines_of_code(req.code)
-    struct = _code_structural_features(req.code)
-    full_metrics = _full_code_metrics(req.code)
+    # 1. Clean submission code
+    clean_code_str = _clean_code(req.code)
 
-    row = {
-        "pass_rate": req.pass_rate if req.pass_rate is not None else np.nan,
-        "test_count": req.test_count if req.test_count is not None else np.nan,
-        "total_tokens": struct["total_tokens"],
-        "def_count": struct["def_count"],
-        "has_docstring": struct["has_docstring"],
-        "cyclomatic_complexity": complexity,
-        "max_complexity": max_complexity,
-        "lines_of_code": loc,
-        **full_metrics,
-    }
-    
-    row["tokens_per_def"] = row["total_tokens"] / (row["def_count"] + 1)
-    row["complexity_per_line"] = row["cyclomatic_complexity"] / ((row["lines_of_code"] or 0) + 1)
+    # 2. Compute non-leakage numerical features
+    num_features = _extract_v2_num_features(clean_code_str, req.code)
 
-    feature_cols = state["grading_feature_cols"]
-    final_feature_idx = state["grading_final_feature_idx"]
+    # 3. Transform via Dual TF-IDF Vectorizers
+    X_char = state["tfidf_char"].transform([clean_code_str])
+    X_word = state["tfidf_word"].transform([clean_code_str])
 
-    missing = [c for c in feature_cols if c not in row]
-    if missing:
-        raise HTTPException(
-            500,
-            f"Feature schema mismatch -- missing columns {missing} in computed features."
-        )
+    # 4. Stack features to create the sparse matrix
+    X_input = hstack([num_features, X_char, X_word]).tocsr()
 
-    x = np.array([[row[c] for c in feature_cols]], dtype=float)
-    x_imputed = state["grading_imputer"].transform(x)[:, final_feature_idx]
-    
-    # Raw prediction from model (e.g., 15.2013)
-    raw_pred = float(state["grading_model"].predict(x_imputed)[0])
+    # 5. Predict discrete class label [0, 1, 2]
+    class_pred = int(state["grading_model"].predict(X_input)[0])
+    raw_quality_score = state["rev_target_map"].get(class_pred, 15.2)
 
-    # --- MIN-MAX SCALING TO RANGE [0, 1] ---
-    MIN_VAL = 15.1000
-    MAX_VAL = 15.3000
-    
-    # Scale to 0-1 and clamp to handle slight out-of-bound predictions
-    scaled_pred = (raw_pred - MIN_VAL) / (MAX_VAL - MIN_VAL)
-    scaled_pred = float(np.clip(scaled_pred, 0.0, 1.0))
+    # 6. Optional min-max normalization to [0, 1] range
+    MIN_VAL, MAX_VAL = 15.1, 15.3
+    scaled_pred = float(np.clip((raw_quality_score - MIN_VAL) / (MAX_VAL - MIN_VAL), 0.0, 1.0))
+
+    # Optional: Extract Radon complexity stats for metadata response
+    complexity, loc = None, None
+    if RADON_AVAILABLE:
+        c_stats = _complexity_stats(req.code)
+        complexity = None if np.isnan(c_stats["cyclomatic_complexity"]) else round(c_stats["cyclomatic_complexity"], 2)
+        l_stat = _lines_of_code(req.code)
+        loc = None if np.isnan(l_stat) else l_stat
 
     return GradeResponse(
         predicted_quality_score=round(scaled_pred, 4),
-        model_used=state["grading_model_name"],
-        cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
-        lines_of_code=None if np.isnan(loc) else loc,
+        model_used="XGBoost_V2_DualTFIDF",
+        cyclomatic_complexity=complexity,
+        lines_of_code=loc,
     )
