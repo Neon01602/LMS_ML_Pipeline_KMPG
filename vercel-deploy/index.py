@@ -61,7 +61,8 @@ def _load_triage():
 
 
 def _load_grading():
-    if "grading_bundle" not in _state:
+    global lgb  # Ensures global lightgbm reference is correctly accessed inside function scope
+    if "grading_grading_bundle" not in _state and "grading_bundle" not in _state:
         json_path = os.path.join(MODELS_DIR, "lgbm_model.json")
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
 
