@@ -30,16 +30,29 @@ MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 _state = {}
 
 
-def _load():
-    if _state:
-        return _state
-    with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
-        _state["metadata"] = json.load(f)
-    _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model.pkl"))
-    _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
-    _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
-    _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
-    _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
+def _load_metadata():
+    if "metadata" not in _state:
+        with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
+            _state["metadata"] = json.load(f)
+    return _state["metadata"]
+
+
+def _load_triage():
+    """Load only what /api/triage needs, independent of the grading model."""
+    if "vec" not in _state:
+        _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
+        _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
+        _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
+    _load_metadata()
+    return _state
+
+
+def _load_grading():
+    """Load only what /api/grade needs, independent of the triage models."""
+    if "grading_model" not in _state:
+        _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model.pkl"))
+        _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
+    _load_metadata()
     return _state
 
 
@@ -124,7 +137,7 @@ def health():
 
 @app.post("/api/triage", response_model=TriageResponse)
 def triage(req: TriageRequest):
-    state = _load()
+    state = _load_triage()
     X_txt = state["vec"].transform([req.post_text])
 
     predicted_topic = state["topic_clf"].predict(X_txt)[0]
@@ -144,7 +157,10 @@ def grade(req: GradeRequest):
     if not RADON_AVAILABLE:
         raise HTTPException(500, "radon not installed on server")
 
-    state = _load()
+    try:
+        state = _load_grading()
+    except Exception as e:
+        raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
     meta = state["metadata"]
 
     complexity = _cyclomatic_complexity(req.code)
