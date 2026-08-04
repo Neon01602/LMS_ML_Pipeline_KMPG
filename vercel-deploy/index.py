@@ -10,6 +10,7 @@ import re
 from typing import Optional
 
 import joblib
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -52,12 +53,26 @@ def _load_triage():
 
 def _load_grading():
     if "grading_bundle" not in _state:
-        model_path = os.path.join(MODELS_DIR, "grading_model.joblib")
-        if not os.path.exists(model_path):
+        json_path = os.path.join(MODELS_DIR, "lgbm_model.json")
+        artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
+
+        if not os.path.exists(json_path) or not os.path.exists(artifacts_path):
             raise FileNotFoundError(
-                f"Missing model file {model_path} in {MODELS_DIR}. Check deployment bundle."
+                f"Missing grading files in {MODELS_DIR}. Ensure lgbm_model.json and grading_artifacts.joblib are present."
             )
-        _state["grading_bundle"] = joblib.load(model_path)
+
+        # Load LightGBM booster directly from JSON string content
+        with open(json_path, "r") as f:
+            model_str = f.read()
+        booster = lgb.Booster(model_str=model_str)
+
+        artifacts = joblib.load(artifacts_path)
+        _state["grading_bundle"] = {
+            "model": booster,
+            "feature_cols": artifacts["feature_cols"],
+            "imputer": artifacts["imputer"],
+            "numeric_with_na": artifacts["numeric_with_na"],
+        }
     return _state
 
 
@@ -78,7 +93,7 @@ def _extract_features(
     hours_before_deadline: Optional[float] = None,
     student_avg_past_score: Optional[float] = None,
 ) -> pd.DataFrame:
-    """Extracts features matching the training dataframe structure expected by grading_model.joblib."""
+    """Extracts features matching the training dataframe structure."""
     try:
         tree = ast.parse(code_str)
         ast_nodes = list(ast.walk(tree))
@@ -275,16 +290,15 @@ def grade(req: GradeRequest):
         student_avg_past_score=req.student_avg_past_score,
     )
 
-    # Impute missing values strictly using components stored inside grading_model.joblib
     for col in numeric_with_na:
         if col not in df_feats.columns:
             df_feats[col] = np.nan
 
     df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
 
-    # Reorder columns to match model expectations stored in the grading bundle
     X_input = df_feats[feature_cols]
 
+    # Booster.predict takes a dataframe/matrix directly
     raw_predicted_score = float(model.predict(X_input)[0])
     final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
 
@@ -304,7 +318,7 @@ def grade(req: GradeRequest):
 
     return GradeResponse(
         predicted_quality_score=round(final_score, 4),
-        model_used="grading_model.joblib",
+        model_used="lgbm_model.json",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
     )
