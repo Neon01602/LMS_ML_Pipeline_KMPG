@@ -1,13 +1,6 @@
 # lgbm_model_data.py
 
-LGBM_MODEL_DICT = {
-    "objective": "regression",
-    "average_output": False,
-    "model_info": {
-        "min_data_per_group": 0.0
-    },
-    "tree_info": [
-        tree
+LGBM_MODEL_DICT=r"""tree
         version=v4
         num_class=1
         num_tree_per_iteration=1
@@ -3957,8 +3950,4 @@ LGBM_MODEL_DICT = {
         [gpu_use_dp: 0]
         [num_gpu: 1]
         
-        end of parameters
-        
-        pandas_categorical:[]
-    ]
-}
+        end of parameters"""
