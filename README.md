@@ -26,8 +26,8 @@ To re-run the notebook (`LMS_ML_Pipeline_v3_RealData.ipynb`) yourself:
   `lightgbm`, `radon` — installed by the notebook's setup cell
   (`!pip install -q lightgbm radon datasets`)
 
-No GPU is required — every model here (LightGBM, logistic regression) trains
-in well under a minute on CPU.
+No GPU is required — every model here (LightGBM, HistGradientBoostingRegressor,
+logistic regression) trains in well under a minute on CPU.
 
 ---
 
@@ -94,12 +94,46 @@ different courses.
 
 | Task | Model | Why |
 |---|---|---|
-| Grading | Linear Regression (baseline) vs. LightGBM (tuned via `RandomizedSearchCV`, 5-fold CV) | Winner picked on the validation set, reported once on test |
+| Grading (development) | Linear Regression (baseline) vs. LightGBM vs. HistGradientBoostingRegressor, tuned via `RandomizedSearchCV`, 5-fold CV | All three trained and compared during development |
+| Grading (deployed) | **HistGradientBoostingRegressor** | Selected for production — see deployment note below |
 | Topic classification | Logistic Regression on TF-IDF (unigrams + bigrams, 5000 features), `class_weight="balanced"` | Simple, fast, strong baseline for 9-class text classification |
 | Urgency classification | Logistic Regression wrapped in `CalibratedClassifierCV` (sigmoid, 5-fold) | Calibration matters here because the routing decision below depends on the *probability* being trustworthy, not just the class label |
 
 All splits are 70/15/15 (train/val/test), stratified where relevant, with the
 test set touched exactly once at the end.
+
+### Why HistGradientBoostingRegressor instead of LightGBM in deployment
+
+LightGBM was trained and tuned alongside HistGradientBoostingRegressor during
+development, and both were compared on the validation set. LightGBM's Python
+package ships as a wheel that dynamically links against `libgomp.so.1` (the
+GNU OpenMP runtime) at import time — it doesn't bundle that library, it just
+expects it to already exist on the host system. Vercel's Python serverless
+runtime doesn't include `libgomp.so.1`, and unlike a normal Linux server there's
+no `apt-get`/system-package install step in Vercel's build pipeline to add it.
+The result is an import-time crash in production, even though the exact same
+code runs fine locally or in Colab.
+
+`HistGradientBoostingRegressor` (from `sklearn.ensemble`) is pure-Python/Cython
+and ships as part of scikit-learn itself, with no external compiled
+dependency to resolve at runtime — so it deploys cleanly on Vercel with no
+workaround needed. Its validation performance was close enough to LightGBM's
+that swapping the deployed model cost negligible accuracy for a large gain in
+deployment reliability. LightGBM numbers are kept in this README as a
+development-time comparison point, not as the model actually serving
+predictions in `/api/grade`.
+
+**Would LightGBM work if deployed locally instead of on Vercel?** Generally
+yes. On a normal Linux machine (bare metal, VM, or Docker image built from a
+standard base like `python:3.11-slim`), `libgomp.so.1` is almost always
+already present — it ships as part of `libgomp1`/`libstdc++`, which most base
+images and distros include or pull in as a dependency of something else. On
+Windows, LightGBM's wheel bundles the OpenMP runtime it needs differently and
+doesn't hit this specific issue. The problem here is specific to Vercel's
+minimal, locked-down serverless Python environment, not to LightGBM or to
+"production" in general — a self-hosted server, a VM, or even a Docker
+container with `apt-get install -y libgomp1` in the Dockerfile would run
+LightGBM without any of this.
 
 ### Routing rule
 
@@ -125,7 +159,7 @@ saves the following to a `plots/` folder:
 | `03_quality_score_distribution.png` | Spread of code quality scores |
 | `04_feature_correlation_heatmap.png` | Correlation between grading features (the leakage check, visualized) |
 | `05_complexity_vs_quality.png` | Does more complex code score higher or lower? |
-| `06_grading_model_comparison.png` | Baseline vs. LightGBM validation RMSE |
+| `06_grading_model_comparison.png` | Baseline vs. LightGBM vs. HistGradientBoostingRegressor validation RMSE |
 | `07_urgency_probability_distribution.png` | Predicted urgency probability, split by true label, with the 0.15 threshold marked |
 | `08_threshold_tradeoff.png` | Coverage vs. missed-urgent rate across thresholds — the actual justification for picking 0.15 |
 
@@ -144,8 +178,8 @@ Once generated, drop the images here:
 
 ## Using the live API
 
-The trained models are served as two endpoints. Replace
-`https://YOUR-PROJECT.vercel.app` with your actual deployment URL.
+The trained models are served as two endpoints. 
+`[https://YOUR-PROJECT.vercel.app](https://lms-ml-pipeline.vercel.app/)` 
 
 ### `POST /api/triage`
 
@@ -173,9 +207,10 @@ being closed automatically.
 
 ### `POST /api/grade`
 
-Score a code submission. `pass_rate` and `test_count` are optional — if you
-don't have test-harness results yet, leave them out and the saved imputer
-fills in a sensible default.
+Score a code submission using the deployed **HistGradientBoostingRegressor**
+model. `pass_rate` and `test_count` are optional — if you don't have
+test-harness results yet, leave them out and the saved imputer fills in a
+sensible default.
 
 **Request**
 ```json
@@ -189,9 +224,9 @@ fills in a sensible default.
 **Response**
 ```json
 {
-  "predicted_quality_score": 7.42,
-  "model_used": "LightGBM",
-  "cyclomatic_complexity": 1.0,
+  "predicted_quality_score": 15.2029,
+  "model_used": "HistGradientBoostingRegressor",
+  "cyclomatic_complexity": 1,
   "lines_of_code": 2
 }
 ```
@@ -207,13 +242,15 @@ before sending real requests.
 
 | Task | Model | Metric | Result |
 |---|---|---|---|
-| Grading | Baseline vs. LightGBM (selected on val) | Test RMSE / R² | *fill in from your run — depends on the 15k-row sample* |
-| Triage — topic | Logistic Regression (TF-IDF) | Val macro-F1 | *fill in from your run* |
-| Triage — urgency | Calibrated Logistic Regression | Val macro-F1 @ 0.5 | *fill in from your run* |
-| Routing | Confidence threshold = 0.15 | Test coverage / missed-urgent rate | *fill in from your run* |
+| Grading (deployed) | HistGradientBoostingRegressor | Test RMSE / R² | 0.049 / 0.105 (Test MAE: 0.031) |
+| Grading (dev comparison only, not deployed) | LightGBM | Val RMSE | 	0.049 (Val R²: 0.120) |
+| Triage — topic | Logistic Regression (TF-IDF) | Val macro-F1 | 	0.667 |
+| Triage — urgency | Calibrated Logistic Regression | Val macro-F1 @ 0.5 | 0.703 (balanced accuracy: 0.669) |
+| Routing | Confidence threshold = 0.15 | Test coverage / missed-urgent rate | 59.3% auto-handled, 5.92% of those missed-urgent |
 
 The point of using real (rather than synthetic) data here wasn't a better
 leaderboard number — real numbers are messier than a hand-built generative
 process produces. The value is that every modeling decision above (the
-composite key, the calibration, the asymmetric threshold) was a response to
-something the data actually did, not something anticipated in advance.
+composite key, the calibration, the asymmetric threshold, and the deployment
+model swap) was a response to something the data or the platform actually
+did, not something anticipated in advance.
