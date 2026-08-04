@@ -5,6 +5,8 @@ internally by FastAPI, see vercel.json for the catch-all rewrite).
 """
 import json
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["LGBM_DISABLE_OPENMP"] = "1"
 from typing import Optional
 
 import joblib
