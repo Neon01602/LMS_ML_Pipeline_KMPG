@@ -4,4 +4,4 @@ numpy==2.0.2
 scikit-learn==1.6.1
 radon==6.0.1
 joblib==1.4.2
-
+xgboost
