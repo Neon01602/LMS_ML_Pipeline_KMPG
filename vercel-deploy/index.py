@@ -54,46 +54,29 @@ import re
 from scipy.sparse import hstack
 
 # ---------------------------------------------------------------
-# Updated Artifact Loader
+# Artifact Loader for 503-Feature Model
 # ---------------------------------------------------------------
 def _load_grading():
-    """Load the new TF-IDF + XGBoost grading artifact."""
     if "grading_artifact" not in _state:
-        artifact = joblib.load(os.path.join(MODELS_DIR, "code_grading_classifier.joblib"))
+        model_path = os.path.join(MODELS_DIR, "code_grading_classifier.joblib")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at {model_path}")
+            
+        artifact = joblib.load(model_path)
         _state["grading_artifact"] = artifact
         _state["grading_model"] = artifact["model"]
-        _state["tfidf_char"] = artifact["tfidf_char"]
-        _state["tfidf_word"] = artifact["tfidf_word"]
+        _state["tfidf"] = artifact["tfidf"]
         _state["target_map"] = artifact["target_map"]
-        # Reverse map to convert class predictions [0, 1, 2] -> [15.1, 15.2, 15.3]
+        # Reverse map class indices [0, 1, 2] back to [15.1, 15.2, 15.3]
         _state["rev_target_map"] = {v: k for k, v in artifact["target_map"].items()}
+        
     return _state
 
-# Helper to clean code fences before TF-IDF extraction
+
 def _clean_code(text: str) -> str:
     text = str(text).strip()
     text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
     return re.sub(r"\n?```$", "", text).strip()
-
-# Helper to extract the exact numerical features expected by V2 model
-def _extract_v2_num_features(clean_code_str: str, raw_code: str) -> np.ndarray:
-    code_len = len(clean_code_str)
-    line_count = clean_code_str.count("\n") + 1
-    has_docstring = int('"""' in raw_code or "'''" in raw_code)
-    
-    if_count = len(re.findall(r"\bif\b", clean_code_str))
-    for_count = len(re.findall(r"\bfor\b", clean_code_str))
-    while_count = len(re.findall(r"\bwhile\b", clean_code_str))
-    try_count = len(re.findall(r"\btry\b", clean_code_str))
-    return_count = len(re.findall(r"\breturn\b", clean_code_str))
-    
-    indent_lengths = [len(line) - len(line.lstrip(" ")) for line in clean_code_str.split("\n")]
-    max_indent = max(indent_lengths) if indent_lengths else 0
-
-    return np.array([[
-        has_docstring, code_len, line_count, if_count,
-        for_count, while_count, try_count, return_count, max_indent
-    ]], dtype=float)
 
 
 
@@ -242,9 +225,6 @@ def triage(req: TriageRequest):
     )
 
 
-# ---------------------------------------------------------------
-# Updated Grade Endpoint
-# ---------------------------------------------------------------
 @app.post("/api/grade", response_model=GradeResponse)
 def grade(req: GradeRequest):
     try:
@@ -252,38 +232,41 @@ def grade(req: GradeRequest):
     except Exception as e:
         raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
 
-    # 1. Clean submission code
-    clean_code_str = _clean_code(req.code)
+    raw_code = req.code
+    clean_code_str = _clean_code(raw_code)
 
-    # 2. Compute non-leakage numerical features
-    num_features = _extract_v2_num_features(clean_code_str, req.code)
+    # 1. Compute 3 numerical features
+    code_len = float(len(clean_code_str))
+    line_count = float(clean_code_str.count("\n") + 1)
+    has_docstring = float(int('"""' in raw_code or "'''" in raw_code))
 
-    # 3. Transform via Dual TF-IDF Vectorizers
-    X_char = state["tfidf_char"].transform([clean_code_str])
-    X_word = state["tfidf_word"].transform([clean_code_str])
+    X_num = np.array([[has_docstring, code_len, line_count]], dtype=float)  # Shape: (1, 3)
 
-    # 4. Stack features to create the sparse matrix
-    X_input = hstack([num_features, X_char, X_word]).tocsr()
+    # 2. Compute 500 TF-IDF features
+    X_text = state["tfidf"].transform([clean_code_str])                     # Shape: (1, 500)
 
-    # 5. Predict discrete class label [0, 1, 2]
-    class_pred = int(state["grading_model"].predict(X_input)[0])
+    # 3. Combine to create full feature array
+    X_combined = hstack([X_num, X_text]).tocsr()                            # Shape: (1, 503)
+
+    # 4. Predict discrete class label & map back to quality score
+    class_pred = int(state["grading_model"].predict(X_combined)[0])
     raw_quality_score = state["rev_target_map"].get(class_pred, 15.2)
 
-    # 6. Optional min-max normalization to [0, 1] range
+    # 5. Min-Max normalize score to range [0, 1]
     MIN_VAL, MAX_VAL = 15.1, 15.3
     scaled_pred = float(np.clip((raw_quality_score - MIN_VAL) / (MAX_VAL - MIN_VAL), 0.0, 1.0))
 
-    # Optional: Extract Radon complexity stats for metadata response
+    # Calculate complexity stats for optional response metrics
     complexity, loc = None, None
     if RADON_AVAILABLE:
-        c_stats = _complexity_stats(req.code)
+        c_stats = _complexity_stats(raw_code)
         complexity = None if np.isnan(c_stats["cyclomatic_complexity"]) else round(c_stats["cyclomatic_complexity"], 2)
-        l_stat = _lines_of_code(req.code)
+        l_stat = _lines_of_code(raw_code)
         loc = None if np.isnan(l_stat) else l_stat
 
     return GradeResponse(
         predicted_quality_score=round(scaled_pred, 4),
-        model_used="XGBoost_V2_DualTFIDF",
+        model_used="XGBoost_TFIDF_Classifier",
         cyclomatic_complexity=complexity,
         lines_of_code=loc,
     )
