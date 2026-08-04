@@ -22,7 +22,7 @@ except ImportError:
 
 app = FastAPI(title="LMS ML Pipeline API")
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 
 # ---------------------------------------------------------------
 # Load models once at cold start (reused across warm invocations)
@@ -104,6 +104,19 @@ def _code_structural_features(code: str) -> dict:
 # ---------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------
+@app.get("/")
+@app.get("/api")
+def root():
+    return {
+        "message": "LMS ML Pipeline API is live",
+        "endpoints": {
+            "health": "GET /api/health",
+            "triage": "POST /api/triage",
+            "grade": "POST /api/grade",
+        },
+    }
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
