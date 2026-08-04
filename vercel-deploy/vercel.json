@@ -1,18 +1,14 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "index.py",
-      "use": "@vercel/python",
-      "config": {
-        "includeFiles": ["models/**", "lgbm_interpreter.py"]
-      }
+  "functions": {
+    "index.py": {
+      "includeFiles": "models/**"
     }
-  ],
+  },
   "routes": [
     {
-      "src": "/(.*)",
-      "dest": "index.py"
+      "source": "/(.*)",
+      "destination": "index.py"
     }
   ]
 }
