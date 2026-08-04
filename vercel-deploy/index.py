@@ -182,7 +182,18 @@ def _extract_ast_and_surface_features(
         complexity_density,
     ]
     return np.array([num_feats], dtype=float)
+    
+def calibrate_score(raw_score: float) -> float:
+  """Applies a post-processing calibration factor to the predicted score
 
+  to better align with ground truth expectations.
+  """
+  # Example: If you want to apply a systematic adjustment
+  # (e.g., pulling low scores up or scaling based on your training MAE/RMSE)
+  # Let's apply a balanced scaling factor or shift:
+  adjusted = raw_score * 1.15  # Example 15% upward shift for testing
+
+  return float(np.clip(adjusted, 0.0, 1.0))
 
 class TriageRequest(BaseModel):
     post_text: str = Field(..., description="Raw text of student doubt")
@@ -246,13 +257,11 @@ def grade(req: GradeRequest):
 
     clean_code_str = _clean_code(req.code)
 
-    # 1. Extract numerical AST and surface features (includes cyclomatic & lines!)
+    # 1. Extract numerical AST and surface features
     X_num = _extract_ast_and_surface_features(
         clean_code_str, req.pass_rate, req.test_count
     )
 
-    # Extract the exact values computed during AST analysis
-    # Index 4 is lines, Index 22 is cyclomatic complexity
     computed_lines = float(X_num[0, 4])
     computed_complexity = float(X_num[0, 22])
 
@@ -270,10 +279,13 @@ def grade(req: GradeRequest):
         padding = np.zeros(REQUIRED_FEATURES - len(dense_features))
         dense_features = np.concatenate([dense_features, padding])
 
-    # 5. Predict quality score
-    predicted_score = state["grading_engine"].predict_one(dense_features)
+    # 5. Predict raw quality score
+    raw_predicted_score = state["grading_engine"].predict_one(dense_features)
 
-    # 6. Fallback or Radon metrics computation with safe defaults
+    # 6. Apply your custom tweaking/calibration logic here
+    final_score = calibrate_score(raw_predicted_score)
+
+    # 7. Fallback or Radon metrics computation with safe defaults
     complexity, loc = computed_complexity, computed_lines
     if RADON_AVAILABLE:
         try:
@@ -284,10 +296,10 @@ def grade(req: GradeRequest):
             if analysis:
                 loc = float(analysis.loc)
         except Exception:
-            pass  # Fall back securely to AST-derived metrics
+            pass
 
     return GradeResponse(
-        predicted_quality_score=round(predicted_score, 4),
+        predicted_quality_score=round(final_score, 4),
         model_used="Pure_Python_LightGBM_Tree_Interpreter",
         cyclomatic_complexity=complexity,
         lines_of_code=loc,
