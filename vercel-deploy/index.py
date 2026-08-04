@@ -58,7 +58,7 @@ from scipy.sparse import hstack
 # ---------------------------------------------------------------
 def _load_grading():
     if "grading_artifact" not in _state:
-        model_path = os.path.join(MODELS_DIR, "code_grading_classifier.joblib")
+        model_path = os.path.join(MODELS_DIR, "code_grading_lgbm.joblib")
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found at {model_path}")
             
