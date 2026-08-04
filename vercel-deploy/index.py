@@ -22,7 +22,7 @@ except ImportError:
 
 app = FastAPI(title="LMS ML Pipeline API")
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "..", "models")
 
 # ---------------------------------------------------------------
 # Load models once at cold start (reused across warm invocations)
@@ -30,29 +30,16 @@ MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 _state = {}
 
 
-def _load_metadata():
-    if "metadata" not in _state:
-        with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
-            _state["metadata"] = json.load(f)
-    return _state["metadata"]
-
-
-def _load_triage():
-    """Load only what /api/triage needs, independent of the grading model."""
-    if "vec" not in _state:
-        _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
-        _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
-        _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
-    _load_metadata()
-    return _state
-
-
-def _load_grading():
-    """Load only what /api/grade needs, independent of the triage models."""
-    if "grading_model" not in _state:
-        _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model.pkl"))
-        _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
-    _load_metadata()
+def _load():
+    if _state:
+        return _state
+    with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
+        _state["metadata"] = json.load(f)
+    _state["grading_model"] = joblib.load(os.path.join(MODELS_DIR, "grading_model.pkl"))
+    _state["grading_imputer"] = joblib.load(os.path.join(MODELS_DIR, "grading_imputer.pkl"))
+    _state["vec"] = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
+    _state["topic_clf"] = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
+    _state["urgency_clf"] = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
     return _state
 
 
@@ -114,22 +101,6 @@ def _code_structural_features(code: str) -> dict:
     }
 
 
-def _normalize_quality_score(raw_pred: float, meta: dict) -> float:
-    """Rescale the raw prediction (which lives in the original dataset's
-    narrow quality_score range, e.g. ~15.1-15.3) into a 0-1 score.
-    q_min/q_max come from metadata.json (subs['quality_score'].min()/.max()
-    from the training notebook) so the API doesn't hardcode magic numbers.
-    Clipped to [0, 1] in case a new submission's raw prediction falls
-    slightly outside the observed training range."""
-    q_min = meta.get("quality_score_min", 15.1)
-    q_max = meta.get("quality_score_max", 15.3)
-    span = q_max - q_min
-    if span <= 0:
-        return 0.0
-    normalized = (raw_pred - q_min) / span
-    return max(0.0, min(1.0, normalized))
-
-
 # ---------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------
@@ -153,7 +124,7 @@ def health():
 
 @app.post("/api/triage", response_model=TriageResponse)
 def triage(req: TriageRequest):
-    state = _load_triage()
+    state = _load()
     X_txt = state["vec"].transform([req.post_text])
 
     predicted_topic = state["topic_clf"].predict(X_txt)[0]
@@ -168,36 +139,35 @@ def triage(req: TriageRequest):
     )
 
 
-from feature_extraction import extract_code_features
+@app.post("/api/grade", response_model=GradeResponse)
+def grade(req: GradeRequest):
+    if not RADON_AVAILABLE:
+        raise HTTPException(500, "radon not installed on server")
 
-artifact = joblib.load("grading_model_v5.joblib")
-model = artifact["model"]
-imputer = artifact["imputer"]
-feature_cols = artifact["feature_cols"]
-final_feature_idx = artifact["final_feature_idx"]
+    state = _load()
+    meta = state["metadata"]
 
-app = FastAPI()
+    complexity = _cyclomatic_complexity(req.code)
+    loc = _lines_of_code(req.code)
+    struct = _code_structural_features(req.code)
 
-class CodeSubmission(BaseModel):
-    answer: str
-    pass_rate: float
-    test_count: int
-    total_tokens: int
-    def_count: int
-    has_docstring: bool
-
-@app.post("/grade")
-def grade(sub: CodeSubmission):
-    feats = extract_code_features(sub.answer)
     row = {
-        "pass_rate": sub.pass_rate, "test_count": sub.test_count,
-        "total_tokens": sub.total_tokens, "def_count": sub.def_count,
-        "has_docstring": int(sub.has_docstring), **feats,
+        "pass_rate": req.pass_rate if req.pass_rate is not None else np.nan,
+        "test_count": req.test_count if req.test_count is not None else np.nan,
+        "total_tokens": struct["total_tokens"],
+        "def_count": struct["def_count"],
+        "has_docstring": struct["has_docstring"],
+        "cyclomatic_complexity": complexity,
+        "lines_of_code": loc,
     }
-    row["tokens_per_def"] = row["total_tokens"] / (row["def_count"] + 1)
-    row["complexity_per_line"] = row["cyclomatic_complexity"] / ((row["lines_of_code"] or 0) + 1)
+    X = np.array([[row[c] for c in meta["grading_feature_cols"]]], dtype=float)
+    X_imputed = state["grading_imputer"].transform(X)
 
-    x = np.array([[row[c] for c in feature_cols]])
-    x_imputed = imputer.transform(x)[:, final_feature_idx]
-    score = float(model.predict(x_imputed)[0])
-    return {"quality_score": score, "model_version": artifact["winner_name"]}
+    pred = float(state["grading_model"].predict(X_imputed)[0])
+
+    return GradeResponse(
+        predicted_quality_score=round(pred, 4),
+        model_used=meta["grading_model_name"],
+        cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
+        lines_of_code=None if np.isnan(loc) else loc,
+    )
