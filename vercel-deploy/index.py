@@ -11,6 +11,7 @@ from typing import Optional
 
 import joblib
 import numpy as np
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -31,8 +32,12 @@ _state = {}
 
 def _load_metadata():
     if "metadata" not in _state:
-        with open(os.path.join(MODELS_DIR, "metadata.json")) as f:
-            _state["metadata"] = json.load(f)
+        metadata_path = os.path.join(MODELS_DIR, "metadata.json")
+        if os.path.exists(metadata_path):
+            with open(metadata_path) as f:
+                _state["metadata"] = json.load(f)
+        else:
+            _state["metadata"] = {}
     return _state["metadata"]
 
 
@@ -270,14 +275,14 @@ def grade(req: GradeRequest):
         student_avg_past_score=req.student_avg_past_score,
     )
 
-    # Impute missing values exactly as done during training pipeline
+    # Impute missing values strictly using components stored inside grading_model.joblib
     for col in numeric_with_na:
         if col not in df_feats.columns:
             df_feats[col] = np.nan
 
     df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
 
-    # Reorder columns to match model expectations
+    # Reorder columns to match model expectations stored in the grading bundle
     X_input = df_feats[feature_cols]
 
     raw_predicted_score = float(model.predict(X_input)[0])
@@ -299,7 +304,7 @@ def grade(req: GradeRequest):
 
     return GradeResponse(
         predicted_quality_score=round(final_score, 4),
-        model_used="Joblib_Grading_Model",
+        model_used="grading_model.joblib",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
     )
