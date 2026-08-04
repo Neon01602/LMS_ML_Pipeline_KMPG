@@ -59,7 +59,7 @@ from scipy.sparse import hstack
 def _load_grading():
     """Load the new TF-IDF + XGBoost grading artifact."""
     if "grading_artifact" not in _state:
-        artifact = joblib.load(os.path.join(MODELS_DIR, "code_grading_classifier_v2.joblib"))
+        artifact = joblib.load(os.path.join(MODELS_DIR, "code_grading_classifier.joblib"))
         _state["grading_artifact"] = artifact
         _state["grading_model"] = artifact["model"]
         _state["tfidf_char"] = artifact["tfidf_char"]
