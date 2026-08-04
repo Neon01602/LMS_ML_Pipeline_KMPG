@@ -153,21 +153,37 @@ def _extract_ast_and_surface_features(
     complexity_density = cyclomatic / max(1.0, node_count)
 
     # Return dense numerical vector matching feature order
+    # Note: Adjusted index order for the first 15 features to align with the LightGBM model metadata:
+    # 0: test_pass_rate, 1: cyclomatic_complexity, 2: lines_of_code, 3: num_functions, 
+    # 4: runtime_ms, 5: memory_kb, 6: num_compile_errors, 7: num_warnings, 
+    # 8: comment_density, 9: num_attempts, 10: hours_before_deadline, 11: student_avg_past_score, 
+    # 12: runtime_ms_missing, 13: memory_kb_missing, 14: comment_density_missing
     num_feats = [
-        pass_val,
-        tests_val,
+        pass_val,               # 0: test_pass_rate
+        cyclomatic,             # 1: cyclomatic_complexity
+        lines,                  # 2: lines_of_code
+        def_count,              # 3: num_functions
+        0.0,                    # 4: runtime_ms (default)
+        1000.0,                 # 5: memory_kb (default)
+        0.0,                    # 6: num_compile_errors
+        0.0,                    # 7: num_warnings
+        comment_density,        # 8: comment_density
+        1.0,                    # 9: num_attempts
+        24.0,                   # 10: hours_before_deadline
+        80.0,                   # 11: student_avg_past_score
+        1.0,                    # 12: runtime_ms_missing
+        1.0,                    # 13: memory_kb_missing
+        0.0,                    # 14: comment_density_missing
+        # Extended auxiliary features beyond max_feature_idx=14
         has_docstring,
         char_len,
-        lines,
         avg_line_len,
         comment_count,
-        comment_density,
         indent_spaces,
         operator_count,
         operator_density,
         syntax_valid,
         node_count,
-        def_count,
         class_count,
         loop_count,
         try_count,
@@ -176,23 +192,17 @@ def _extract_ast_and_surface_features(
         assign_count,
         type_ann_count,
         comp_count,
-        cyclomatic,
         single_char_ratio,
         ast_density,
         complexity_density,
     ]
     return np.array([num_feats], dtype=float)
-    
+      
 def calibrate_score(raw_score: float) -> float:
   """Applies a post-processing calibration factor to the predicted score
-
   to better align with ground truth expectations.
   """
-  # Example: If you want to apply a systematic adjustment
-  # (e.g., pulling low scores up or scaling based on your training MAE/RMSE)
-  # Let's apply a balanced scaling factor or shift:
   adjusted = raw_score * 1.15  # Example 15% upward shift for testing
-
   return float(np.clip(adjusted, 0.0, 1.0))
 
 class TriageRequest(BaseModel):
@@ -257,13 +267,13 @@ def grade(req: GradeRequest):
 
     clean_code_str = _clean_code(req.code)
 
-    # 1. Extract numerical AST and surface features
+    # 1. Extract numerical AST and surface features matching feature indices
     X_num = _extract_ast_and_surface_features(
         clean_code_str, req.pass_rate, req.test_count
     )
 
-    computed_lines = float(X_num[0, 4])
-    computed_complexity = float(X_num[0, 22])
+    computed_lines = float(X_num[0, 2])
+    computed_complexity = float(X_num[0, 1])
 
     # 2. Extract TF-IDF features
     X_char = state["tfidf_char"].transform([clean_code_str])
@@ -304,3 +314,4 @@ def grade(req: GradeRequest):
         cyclomatic_complexity=complexity,
         lines_of_code=loc,
     )
+```[cite: 1]
