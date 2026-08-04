@@ -243,9 +243,7 @@ def grade(req: GradeRequest):
         "lines_of_code": loc,
         **full_metrics,
     }
-    # Derived features -- must match the training notebook's feature
-    # engineering exactly, since feature_cols/final_feature_idx were fit
-    # against these exact derived columns.
+    
     row["tokens_per_def"] = row["total_tokens"] / (row["def_count"] + 1)
     row["complexity_per_line"] = row["cyclomatic_complexity"] / ((row["lines_of_code"] or 0) + 1)
 
@@ -256,18 +254,25 @@ def grade(req: GradeRequest):
     if missing:
         raise HTTPException(
             500,
-            f"Feature schema mismatch -- missing columns {missing} in computed "
-            f"features. Currently computed: {sorted(row.keys())}. "
-            f"Model expects: {feature_cols}",
+            f"Feature schema mismatch -- missing columns {missing} in computed features."
         )
 
     x = np.array([[row[c] for c in feature_cols]], dtype=float)
-
     x_imputed = state["grading_imputer"].transform(x)[:, final_feature_idx]
-    pred = float(state["grading_model"].predict(x_imputed)[0])
+    
+    # Raw prediction from model (e.g., 15.2013)
+    raw_pred = float(state["grading_model"].predict(x_imputed)[0])
+
+    # --- MIN-MAX SCALING TO RANGE [0, 1] ---
+    MIN_VAL = 15.1000
+    MAX_VAL = 15.3000
+    
+    # Scale to 0-1 and clamp to handle slight out-of-bound predictions
+    scaled_pred = (raw_pred - MIN_VAL) / (MAX_VAL - MIN_VAL)
+    scaled_pred = float(np.clip(scaled_pred, 0.0, 1.0))
 
     return GradeResponse(
-        predicted_quality_score=round(pred, 4),
+        predicted_quality_score=round(scaled_pred, 4),
         model_used=state["grading_model_name"],
         cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
         lines_of_code=None if np.isnan(loc) else loc,
