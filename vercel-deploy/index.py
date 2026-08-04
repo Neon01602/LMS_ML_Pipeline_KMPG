@@ -53,80 +53,19 @@ def _load_triage():
 from lgbm_model_data import LGBM_MODEL_DICT
 
 # Update your PurePythonLGBMRegressor initializer to accept a dictionary directly:
-class PurePythonLGBMRegressor:
-    """Evaluates a LightGBM model directly from a Python dictionary structure without C binaries."""
-    def __init__(self, data: dict):
-        self.objective = data.get("objective", "regression")
-        self.average_output = data.get("average_output", False)
-        self.trees = []
-        
-        if "tree_info" in data:
-            for t_info in data["tree_info"]:
-                self.trees.append(t_info.get("tree_structure"))
-        
-        self.base_score = float(data.get("model_info", {}).get("min_data_per_group", 0.0))
 
-    def _predict_tree(self, node: dict, feature_values: np.ndarray) -> float:
-        if "leaf_value" in node:
-            return float(node["leaf_value"])
-
-        feat_idx = int(node.get("split_feature", 0))
-
-        if feat_idx < len(feature_values):
-            val = feature_values[feat_idx]
-        else:
-            val = np.nan
-
-        threshold = float(node.get("threshold", 0.0))
-        default_left = node.get("default_left", True)
-
-        if np.isnan(val):
-            next_node = (
-                node["left_child"] if default_left else node["right_child"]
-            )
-        else:
-            decision_type = node.get("decision_type", "<=")
-            if decision_type == "<=" or decision_type == 2:
-                is_left = val <= threshold
-            else:
-                is_left = val == threshold
-
-            next_node = (
-                node["left_child"] if is_left else node["right_child"]
-            )
-
-        if next_node:
-            return self._predict_tree(next_node, feature_values)
-        return 0.0
-
-    def predict(self, X):
-        predictions = []
-        for x in X:
-            if hasattr(x, "toarray"):
-                x = x.toarray().ravel()
-            x_arr = np.asarray(x, dtype=float)
-            
-            total_score = self.base_score
-            for tree in self.trees:
-                total_score += self._predict_tree(tree, x_arr)
-            
-            predictions.append(float(np.clip(total_score, 0.0, 1.0)))
-        return np.array(predictions)
-
+import lightgbm as lgb
+from lgbm_model_data import LGBM_MODEL_TEXT
 
 def _load_grading():
     if "grading_bundle" not in _state:
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
-
         if not os.path.exists(artifacts_path):
-            raise FileNotFoundError(
-                f"Missing grading_artifacts.joblib in {MODELS_DIR}."
-            )
+            raise FileNotFoundError(f"Missing grading_artifacts.joblib in {MODELS_DIR}.")
 
-        # Initialize directly from the imported python dictionary
-        model = PurePythonLGBMRegressor(LGBM_MODEL_DICT)
+        model = lgb.Booster(model_str=LGBM_MODEL_TEXT)
         artifacts = joblib.load(artifacts_path)
-        
+
         _state["grading_bundle"] = {
             "model": model,
             "feature_cols": artifacts["feature_cols"],
@@ -134,6 +73,7 @@ def _load_grading():
             "numeric_with_na": artifacts["numeric_with_na"],
         }
     return _state
+
 
 def _clean_code(text: str) -> str:
     text = str(text).strip()
