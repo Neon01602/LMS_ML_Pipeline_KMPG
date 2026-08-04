@@ -237,58 +237,58 @@ def triage(req: TriageRequest):
 
 @app.post("/api/grade", response_model=GradeResponse)
 def grade(req: GradeRequest):
-  try:
-    state = _load_grading()
-  except Exception as e:
-    raise HTTPException(
-        500, f"Grading initialization failed: {type(e).__name__}: {e}"
+    try:
+        state = _load_grading()
+    except Exception as e:
+        raise HTTPException(
+            500, f"Grading initialization failed: {type(e).__name__}: {e}"
+        )
+
+    clean_code_str = _clean_code(req.code)
+
+    # 1. Extract numerical AST and surface features (includes cyclomatic & lines!)
+    X_num = _extract_ast_and_surface_features(
+        clean_code_str, req.pass_rate, req.test_count
     )
 
-  clean_code_str = _clean_code(req.code)
+    # Extract the exact values computed during AST analysis
+    # Index 4 is lines, Index 22 is cyclomatic complexity
+    computed_lines = float(X_num[0, 4])
+    computed_complexity = float(X_num[0, 22])
 
-  # 1. Extract numerical AST and surface features (includes cyclomatic & lines!)
-  X_num = _extract_ast_and_surface_features(
-      clean_code_str, req.pass_rate, req.test_count
-  )
+    # 2. Extract TF-IDF features
+    X_char = state["tfidf_char"].transform([clean_code_str])
+    X_word = state["tfidf_word"].transform([clean_code_str])
 
-  # Extract the exact values computed during AST analysis
-  # (Indices 4 is lines, Index 22 is cyclomatic complexity based on your num_feats array)
-  computed_lines = float(X_num[0, 4])
-  computed_complexity = float(X_num[0, 22])
+    # 3. Stack features into a single sparse array
+    X_combined = hstack([X_num, X_char, X_word]).tocsr()
+    dense_features = X_combined.toarray().ravel()
 
-  # 2. Extract TF-IDF features
-  X_char = state["tfidf_char"].transform([clean_code_str])
-  X_word = state["tfidf_word"].transform([clean_code_str])
+    # 4. Pad array if total feature count is less than 1028
+    REQUIRED_FEATURES = 1028
+    if len(dense_features) < REQUIRED_FEATURES:
+        padding = np.zeros(REQUIRED_FEATURES - len(dense_features))
+        dense_features = np.concatenate([dense_features, padding])
 
-  # 3. Stack features into a single sparse array
-  X_combined = hstack([X_num, X_char, X_word]).tocsr()
-  dense_features = X_combined.toarray().ravel()
+    # 5. Predict quality score
+    predicted_score = state["grading_engine"].predict_one(dense_features)
 
-  # 4. Pad array if total feature count is less than 1028
-  REQUIRED_FEATURES = 1028
-  if len(dense_features) < REQUIRED_FEATURES:
-    padding = np.zeros(REQUIRED_FEATURES - len(dense_features))
-    dense_features = np.concatenate([dense_features, padding])
+    # 6. Fallback or Radon metrics computation with safe defaults
+    complexity, loc = computed_complexity, computed_lines
+    if RADON_AVAILABLE:
+        try:
+            blocks = cc_visit(req.code)
+            if blocks:
+                complexity = round(float(np.mean([b.complexity for b in blocks])), 2)
+            analysis = analyze(req.code)
+            if analysis:
+                loc = float(analysis.loc)
+        except Exception:
+            pass  # Fall back securely to AST-derived metrics
 
-  # 5. Predict quality score
-  predicted_score = state["grading_engine"].predict_one(dense_features)
-
-  # 6. Fallback to Radon only if desired, otherwise use AST metrics directly
-  complexity, loc = computed_complexity, computed_lines
-  if RADON_AVAILABLE:
-    try:
-      blocks = cc_visit(req.code)
-      if blocks:
-        complexity = round(float(np.mean([b.complexity for b in blocks])), 2)
-      analysis = analyze(req.code)
-      if analysis:
-        loc = float(analysis.loc)
-    except Exception:
-      pass  # Fall back safely to AST-derived metrics
-
-  return GradeResponse(
-      predicted_quality_score=round(predicted_score, 4),
-      model_used="Pure_Python_LightGBM_Tree_Interpreter",
-      cyclomatic_complexity=complexity,
-      lines_of_code=loc,
-  )
+    return GradeResponse(
+        predicted_quality_score=round(predicted_score, 4),
+        model_used="Pure_Python_LightGBM_Tree_Interpreter",
+        cyclomatic_complexity=complexity,
+        lines_of_code=loc,
+    )
