@@ -123,16 +123,6 @@ def _lines_of_code(code: str) -> float:
 
 
 def _full_code_metrics(code: str) -> dict:
-    """Computes every remaining feature_cols entry not already covered by
-    _complexity_stats / _lines_of_code / _code_structural_features:
-    raw line-count breakdown (radon.raw), Halstead metrics and
-    maintainability index (radon.metrics), and a parse_failed flag.
-
-    If the code doesn't parse (syntax error, truncated snippet, etc.), all
-    numeric fields come back as NaN so the saved imputer fills them in --
-    the same "failed-to-parse is itself informative" approach used in the
-    training notebook -- and parse_failed is set to 1.
-    """
     nan_result = {
         "logical_lines": float("nan"),
         "comment_lines": float("nan"),
@@ -147,11 +137,15 @@ def _full_code_metrics(code: str) -> dict:
     }
     try:
         raw = analyze(code)
-        loc = raw.loc or 1  # avoid div-by-zero; loc is already computed separately too
+        loc = raw.loc or 1  # avoid div-by-zero
         comment_lines = raw.comments + raw.single_comments
 
         h = h_visit(code).total
         mi = mi_visit(code, True)
+
+        # Min-Max Normalize MI to range [0, 1]
+        # Radon MI scale theoretically ranges from 0 to 100
+        normalized_mi = max(0.0, min(1.0, float(mi) / 100.0))
 
         return {
             "logical_lines": float(raw.lloc),
@@ -162,7 +156,7 @@ def _full_code_metrics(code: str) -> dict:
             "halstead_volume": float(h.volume),
             "halstead_difficulty": float(h.difficulty),
             "halstead_effort": float(h.effort),
-            "maintainability_index": float(mi),
+            "maintainability_index": normalized_mi,
             "parse_failed": 0,
         }
     except Exception:
