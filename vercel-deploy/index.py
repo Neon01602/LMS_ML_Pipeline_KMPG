@@ -1,6 +1,6 @@
 """
 FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function using pure-Python LightGBM JSON tree evaluation.
+Runs as a single Vercel Python serverless function using real LightGBM.
 """
 
 import ast
@@ -11,6 +11,7 @@ from typing import Optional
 
 import joblib
 import numpy as np
+import lightgbm as lgb
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -50,18 +51,17 @@ def _load_triage():
     return _state
 
 
-from lgbm_model_data import LGBM_MODEL_DICT
-
-# Update your PurePythonLGBMRegressor initializer to accept a dictionary directly:
-
-import lightgbm as lgb
 from lgbm_model_data import LGBM_MODEL_TEXT
+
 
 def _load_grading():
     if "grading_bundle" not in _state:
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
+
         if not os.path.exists(artifacts_path):
-            raise FileNotFoundError(f"Missing grading_artifacts.joblib in {MODELS_DIR}.")
+            raise FileNotFoundError(
+                f"Missing grading_artifacts.joblib in {MODELS_DIR}."
+            )
 
         model = lgb.Booster(model_str=LGBM_MODEL_TEXT)
         artifacts = joblib.load(artifacts_path)
@@ -315,7 +315,7 @@ def grade(req: GradeRequest):
 
     return GradeResponse(
         predicted_quality_score=round(final_score, 4),
-        model_used="lgbm_model.json",
+        model_used="lgbm_model.txt",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
     )
