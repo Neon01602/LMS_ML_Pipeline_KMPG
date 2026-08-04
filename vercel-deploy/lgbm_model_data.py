@@ -1,6 +1,6 @@
 # lgbm_model_data.py
 
-LGBM_MODEL_DICT=r"""tree
+LGBM_MODEL_DICT=textwrap.dedent(r"""tree
         version=v4
         num_class=1
         num_tree_per_iteration=1
@@ -3950,4 +3950,4 @@ LGBM_MODEL_DICT=r"""tree
         [gpu_use_dp: 0]
         [num_gpu: 1]
         
-        end of parameters"""
+        end of parameters""").lstrip()
