@@ -1,8 +1,3 @@
-"""
-FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function (all routes handled
-internally by FastAPI, see vercel.json for the catch-all rewrite).
-"""
 import json
 import os
 from typing import Optional
@@ -104,6 +99,19 @@ def _code_structural_features(code: str) -> dict:
 # ---------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------
+@app.get("/")
+@app.get("/api")
+def root():
+    return {
+        "message": "LMS ML Pipeline API is live",
+        "endpoints": {
+            "health": "GET /api/health",
+            "triage": "POST /api/triage",
+            "grade": "POST /api/grade",
+        },
+    }
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
