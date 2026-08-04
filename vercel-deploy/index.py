@@ -1,6 +1,6 @@
 """
 FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function without pandas dependency.
+Runs as a single Vercel Python serverless function using split JSON/Joblib artifacts.
 """
 
 import ast
@@ -9,9 +9,19 @@ import os
 import re
 from typing import Optional
 
+# CRITICAL: Prevent LightGBM from trying to load missing system OpenMP shared libraries on Vercel
+os.environ["LGB_VERBOSITY"] = "-1"
+os.environ["OMP_NUM_THREADS"] = "1"
+
 import joblib
-import lightgbm as lgb
 import numpy as np
+
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except OSError:
+    LIGHTGBM_AVAILABLE = False
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -62,7 +72,11 @@ def _load_grading():
 
         with open(json_path, "r") as f:
             model_str = f.read()
-        booster = lgb.Booster(model_str=model_str)
+        
+        try:
+            booster = lgb.Booster(model_str=model_str)
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize LightGBM Booster from JSON: {e}")
 
         artifacts = joblib.load(artifacts_path)
         _state["grading_bundle"] = {
@@ -90,8 +104,7 @@ def _extract_features(
     num_attempts: Optional[float] = None,
     hours_before_deadline: Optional[float] = None,
     student_avg_past_score: Optional[float] = None,
-) -> dict:  # <--- THIS IS THE CRITICAL LINE. IT MUST BE `dict`, NOT `pd.DataFrame`
-    """Extracts features as a raw dictionary matching training parameters."""
+) -> dict:
     try:
         tree = ast.parse(code_str)
         ast_nodes = list(ast.walk(tree))
@@ -285,7 +298,6 @@ def grade(req: GradeRequest):
         student_avg_past_score=req.student_avg_past_score,
     )
 
-    # Impute missing values for numeric columns using pure numpy arrays
     row_values = []
     for col in numeric_with_na:
         val = features_dict.get(col, np.nan)
@@ -295,7 +307,6 @@ def grade(req: GradeRequest):
     for idx, col in enumerate(numeric_with_na):
         features_dict[col] = imputed_array[0][idx]
 
-    # Build input array strictly matching feature_cols order
     X_input = [[features_dict.get(col, 0.0) for col in feature_cols]]
 
     raw_predicted_score = float(model.predict(X_input)[0])
