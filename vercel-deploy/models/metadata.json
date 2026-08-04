@@ -1,0 +1,24 @@
+{
+  "grading_model_name": "LightGBM",
+  "grading_feature_cols": [
+    "pass_rate",
+    "test_count",
+    "total_tokens",
+    "def_count",
+    "has_docstring",
+    "cyclomatic_complexity",
+    "lines_of_code"
+  ],
+  "urgency_threshold": 0.15,
+  "topic_classes": [
+    "acc",
+    "calc",
+    "design",
+    "gam",
+    "global",
+    "modern",
+    "mythology",
+    "probability",
+    "vaccines"
+  ]
+}
