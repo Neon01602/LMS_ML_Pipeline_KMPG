@@ -67,17 +67,13 @@ def _load_grading():
         _state["grading_model"] = artifact["model"]
         _state["tfidf"] = artifact["tfidf"]
         _state["target_map"] = artifact["target_map"]
-        # Reverse map class indices [0, 1, 2] back to [15.1, 15.2, 15.3]
-        _state["rev_target_map"] = {v: k for k, v in artifact["target_map"].items()}
         
     return _state
-
 
 def _clean_code(text: str) -> str:
     text = str(text).strip()
     text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
     return re.sub(r"\n?```$", "", text).strip()
-
 
 
 # ---------------------------------------------------------------
@@ -94,11 +90,13 @@ class TriageResponse(BaseModel):
     threshold_used: float
 
 
+# ---------------------------------------------------------------
+# Request / Response Schemas
+# ---------------------------------------------------------------
 class GradeRequest(BaseModel):
     code: str = Field(..., description="Source code submission to grade")
     pass_rate: Optional[float] = Field(None, description="Fraction of tests passed, 0-1, if known")
     test_count: Optional[int] = Field(None, description="Number of tests run against this submission, if known")
-
 
 class GradeResponse(BaseModel):
     predicted_quality_score: float
@@ -235,28 +233,28 @@ def grade(req: GradeRequest):
     raw_code = req.code
     clean_code_str = _clean_code(raw_code)
 
-    # 1. Compute 3 numerical features
+    # 1. Compute 3 structural non-leakage numerical features
     code_len = float(len(clean_code_str))
     line_count = float(clean_code_str.count("\n") + 1)
     has_docstring = float(int('"""' in raw_code or "'''" in raw_code))
 
     X_num = np.array([[has_docstring, code_len, line_count]], dtype=float)  # Shape: (1, 3)
 
-    # 2. Compute 500 TF-IDF features
+    # 2. Extract 500 character TF-IDF features
     X_text = state["tfidf"].transform([clean_code_str])                     # Shape: (1, 500)
 
-    # 3. Combine to create full feature array
+    # 3. Stack into full 503-feature matrix
     X_combined = hstack([X_num, X_text]).tocsr()                            # Shape: (1, 503)
 
-    # 4. Predict discrete class label & map back to quality score
-    class_pred = int(state["grading_model"].predict(X_combined)[0])
-    raw_quality_score = state["rev_target_map"].get(class_pred, 15.2)
+    # 4. Get class probability distributions [P(15.1), P(15.2), P(15.3)]
+    probs = state["grading_model"].predict_proba(X_combined)[0]
 
-    # 5. Min-Max normalize score to range [0, 1]
-    MIN_VAL, MAX_VAL = 15.1, 15.3
-    scaled_pred = float(np.clip((raw_quality_score - MIN_VAL) / (MAX_VAL - MIN_VAL), 0.0, 1.0))
+    # 5. Calculate smooth continuous score in range [0.0, 1.0]
+    # Weight mapping: Class 0 (15.1) -> 0.0 | Class 1 (15.2) -> 0.5 | Class 2 (15.3) -> 1.0
+    class_weights = np.array([0.0, 0.5, 1.0])
+    continuous_score = float(np.dot(probs, class_weights))
 
-    # Calculate complexity stats for optional response metrics
+    # Optional Radon Complexity Metrics
     complexity, loc = None, None
     if RADON_AVAILABLE:
         c_stats = _complexity_stats(raw_code)
@@ -265,8 +263,8 @@ def grade(req: GradeRequest):
         loc = None if np.isnan(l_stat) else l_stat
 
     return GradeResponse(
-        predicted_quality_score=round(scaled_pred, 4),
-        model_used="XGBoost_TFIDF_Classifier",
+        predicted_quality_score=round(continuous_score, 4),
+        model_used="Balanced_XGBoost_Probabilistic_Grading",
         cyclomatic_complexity=complexity,
         lines_of_code=loc,
     )
