@@ -1,6 +1,6 @@
 """
 FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function.
+Runs as a single Vercel Python serverless function without pandas dependency.
 """
 
 import ast
@@ -12,13 +12,6 @@ from typing import Optional
 import joblib
 import lightgbm as lgb
 import numpy as np
-
-try:
-    import pandas as pd
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -97,8 +90,8 @@ def _extract_features(
     num_attempts: Optional[float] = None,
     hours_before_deadline: Optional[float] = None,
     student_avg_past_score: Optional[float] = None,
-):
-    """Extracts features matching the training structure."""
+) -> dict:
+    """Extracts features as a raw dictionary matching training parameters."""
     try:
         tree = ast.parse(code_str)
         ast_nodes = list(ast.walk(tree))
@@ -164,7 +157,7 @@ def _extract_features(
     ast_density = node_count / lines
     complexity_density = cyclomatic / max(1.0, node_count)
 
-    features_dict = {
+    return {
         "test_pass_rate": pass_rate if pass_rate is not None else 0.5,
         "cyclomatic_complexity": cyclomatic,
         "lines_of_code": lines,
@@ -201,10 +194,6 @@ def _extract_features(
         "ast_density": ast_density,
         "complexity_density": complexity_density,
     }
-
-    if PANDAS_AVAILABLE:
-        return pd.DataFrame([features_dict])
-    return features_dict
 
 
 class TriageRequest(BaseModel):
@@ -284,8 +273,7 @@ def grade(req: GradeRequest):
     numeric_with_na = bundle["numeric_with_na"]
 
     clean_code_str = _clean_code(req.code)
-
-    df_feats = _extract_features(
+    features_dict = _extract_features(
         code_str=clean_code_str,
         pass_rate=req.pass_rate,
         test_count=req.test_count,
@@ -297,28 +285,24 @@ def grade(req: GradeRequest):
         student_avg_past_score=req.student_avg_past_score,
     )
 
-    if PANDAS_AVAILABLE:
-        for col in numeric_with_na:
-            if col not in df_feats.columns:
-                df_feats[col] = np.nan
-        df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
-        X_input = df_feats[feature_cols]
-        computed_complexity = float(df_feats["cyclomatic_complexity"].iloc[0])
-        computed_lines = float(df_feats["lines_of_code"].iloc[0])
-    else:
-        # Fallback dictionary row structure if pandas isn't loaded
-        for col in numeric_with_na:
-            if col not in df_feats:
-                df_feats[col] = np.nan
-        imputed_array = imputer.transform([[df_feats[c] for c in numeric_with_na]])
-        for idx, col in enumerate(numeric_with_na):
-            df_feats[col] = imputed_array[0][idx]
-        X_input = [[df_feats[col] for col in feature_cols]]
-        computed_complexity = float(df_feats["cyclomatic_complexity"])
-        computed_lines = float(df_feats["lines_of_code"])
+    # Impute missing values for numeric columns using pure numpy arrays
+    row_values = []
+    for col in numeric_with_na:
+        val = features_dict.get(col, np.nan)
+        row_values.append(np.nan if val is None else val)
+
+    imputed_array = imputer.transform([row_values])
+    for idx, col in enumerate(numeric_with_na):
+        features_dict[col] = imputed_array[0][idx]
+
+    # Build input array strictly matching feature_cols order
+    X_input = [[features_dict.get(col, 0.0) for col in feature_cols]]
 
     raw_predicted_score = float(model.predict(X_input)[0])
     final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
+
+    computed_complexity = float(features_dict["cyclomatic_complexity"])
+    computed_lines = float(features_dict["lines_of_code"])
 
     if RADON_AVAILABLE:
         try:
