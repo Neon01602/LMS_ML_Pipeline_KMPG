@@ -12,7 +12,13 @@ from typing import Optional
 import joblib
 import lightgbm as lgb
 import numpy as np
-import pandas as pd
+
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -61,7 +67,6 @@ def _load_grading():
                 f"Missing grading files in {MODELS_DIR}. Ensure lgbm_model.json and grading_artifacts.joblib are present."
             )
 
-        # Load LightGBM booster directly from JSON string content
         with open(json_path, "r") as f:
             model_str = f.read()
         booster = lgb.Booster(model_str=model_str)
@@ -92,8 +97,8 @@ def _extract_features(
     num_attempts: Optional[float] = None,
     hours_before_deadline: Optional[float] = None,
     student_avg_past_score: Optional[float] = None,
-) -> pd.DataFrame:
-    """Extracts features matching the training dataframe structure."""
+):
+    """Extracts features matching the training structure."""
     try:
         tree = ast.parse(code_str)
         ast_nodes = list(ast.walk(tree))
@@ -197,7 +202,9 @@ def _extract_features(
         "complexity_density": complexity_density,
     }
 
-    return pd.DataFrame([features_dict])
+    if PANDAS_AVAILABLE:
+        return pd.DataFrame([features_dict])
+    return features_dict
 
 
 class TriageRequest(BaseModel):
@@ -290,20 +297,28 @@ def grade(req: GradeRequest):
         student_avg_past_score=req.student_avg_past_score,
     )
 
-    for col in numeric_with_na:
-        if col not in df_feats.columns:
-            df_feats[col] = np.nan
+    if PANDAS_AVAILABLE:
+        for col in numeric_with_na:
+            if col not in df_feats.columns:
+                df_feats[col] = np.nan
+        df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
+        X_input = df_feats[feature_cols]
+        computed_complexity = float(df_feats["cyclomatic_complexity"].iloc[0])
+        computed_lines = float(df_feats["lines_of_code"].iloc[0])
+    else:
+        # Fallback dictionary row structure if pandas isn't loaded
+        for col in numeric_with_na:
+            if col not in df_feats:
+                df_feats[col] = np.nan
+        imputed_array = imputer.transform([[df_feats[c] for c in numeric_with_na]])
+        for idx, col in enumerate(numeric_with_na):
+            df_feats[col] = imputed_array[0][idx]
+        X_input = [[df_feats[col] for col in feature_cols]]
+        computed_complexity = float(df_feats["cyclomatic_complexity"])
+        computed_lines = float(df_feats["lines_of_code"])
 
-    df_feats[numeric_with_na] = imputer.transform(df_feats[numeric_with_na])
-
-    X_input = df_feats[feature_cols]
-
-    # Booster.predict takes a dataframe/matrix directly
     raw_predicted_score = float(model.predict(X_input)[0])
     final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
-
-    computed_complexity = float(df_feats["cyclomatic_complexity"].iloc[0])
-    computed_lines = float(df_feats["lines_of_code"].iloc[0])
 
     if RADON_AVAILABLE:
         try:
