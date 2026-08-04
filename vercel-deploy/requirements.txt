@@ -1,8 +1,8 @@
 fastapi==0.115.0
 pydantic==2.9.2
-numpy==1.26.0
+numpy==1.26.4
 scikit-learn==1.6.1
 radon==6.0.1
 joblib==1.4.2
-lightgbm
+lightgbm==4.3.0
 pandas==2.2.1
