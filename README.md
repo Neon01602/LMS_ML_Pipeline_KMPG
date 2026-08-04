@@ -56,7 +56,9 @@ Real student discussion posts from **9 Stanford MOOC courses** (accounting, calc
 
 Target undergoes normalization + rank transformation to correct for density clustering around central `quality_score` values:
 
-$$\text{target\_raw} = \text{clip}\left(\frac{\text{quality\_score} - 15.1}{15.3 - 15.1}, 0.0, 1.0\right), \quad y = \text{RankTransform}(\text{target\_raw})$$
+$$\text{target\_raw} = \text{clip}\left(\frac{\text{quality\_score} - 15.1}{15.3 - 15.1}, 0.0, 1.0\right)$$
+
+$$y = \text{RankTransform}(\text{target\_raw})$$
 
 The LightGBM grading engine uses a **1,018-dimensional** sparse feature set:
 
@@ -107,6 +109,34 @@ Auto-handle a doubt only when `P(urgent) < 0.15`, chosen by sweeping the thresho
 | Escalation routing | Confidence threshold (P < 0.15) | Auto-handle coverage / missed urgency | 59.3% / 5.92% |
 
 Min predicted quality score: 0.0159 · Max predicted quality score: 0.9629
+
+---
+
+## Visualizations
+
+The notebook includes a plotting cell (`generate_plots.py` in this repo — paste it in as a new cell after the grading and triage cells have run) that saves the following to a `plots/` folder:
+
+| Plot | Shows |
+|---|---|
+| `01_topic_distribution.png` | How many forum posts came from each course |
+| `02_urgency_balance.png` | Urgent vs. non-urgent post split |
+| `03_quality_score_distribution.png` | Spread of code quality scores |
+| `04_feature_correlation_heatmap.png` | Correlation between grading features (the leakage check, visualized) |
+| `05_complexity_vs_quality.png` | Does more complex code score higher or lower? |
+| `06_grading_model_comparison.png` | Baseline vs. LightGBM validation RMSE |
+| `07_urgency_probability_distribution.png` | Predicted urgency probability, split by true label, with the 0.15 threshold marked |
+| `08_threshold_tradeoff.png` | Coverage vs. missed-urgent rate across thresholds — the actual justification for picking 0.15 |
+
+Once generated, drop the images here:
+
+![Topic distribution](vercel-deploy/plots/01_topic_distribution.png)
+![Urgency balance](vercel-deploy/plots/02_urgency_balance.png)
+![Quality score distribution](vercel-deploy/plots/03_quality_score_distribution.png)
+![Feature correlation](vercel-deploy/plots/04_feature_correlation_heatmap.png)
+![Complexity vs quality](vercel-deploy/plots/05_complexity_vs_quality.png)
+![Grading model comparison](vercel-deploy/plots/06_grading_model_comparison.png)
+![Urgency probability distribution](vercel-deploy/plots/07_urgency_probability_distribution.png)
+![Threshold tradeoff](vercel-deploy/plots/08_threshold_tradeoff.png)
 
 ---
 
