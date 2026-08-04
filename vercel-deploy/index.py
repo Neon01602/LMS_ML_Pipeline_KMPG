@@ -114,6 +114,22 @@ def _code_structural_features(code: str) -> dict:
     }
 
 
+def _normalize_quality_score(raw_pred: float, meta: dict) -> float:
+    """Rescale the raw prediction (which lives in the original dataset's
+    narrow quality_score range, e.g. ~15.1-15.3) into a 0-1 score.
+    q_min/q_max come from metadata.json (subs['quality_score'].min()/.max()
+    from the training notebook) so the API doesn't hardcode magic numbers.
+    Clipped to [0, 1] in case a new submission's raw prediction falls
+    slightly outside the observed training range."""
+    q_min = meta.get("quality_score_min", 15.1)
+    q_max = meta.get("quality_score_max", 15.3)
+    span = q_max - q_min
+    if span <= 0:
+        return 0.0
+    normalized = (raw_pred - q_min) / span
+    return max(0.0, min(1.0, normalized))
+
+
 # ---------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------
@@ -179,10 +195,11 @@ def grade(req: GradeRequest):
     X = np.array([[row[c] for c in meta["grading_feature_cols"]]], dtype=float)
     X_imputed = state["grading_imputer"].transform(X)
 
-    pred = float(state["grading_model"].predict(X_imputed)[0])
+    raw_pred = float(state["grading_model"].predict(X_imputed)[0])
+    normalized_pred = _normalize_quality_score(raw_pred, meta)
 
     return GradeResponse(
-        predicted_quality_score=round(pred, 4),
+        predicted_quality_score=round(normalized_pred, 4),
         model_used=meta["grading_model_name"],
         cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
         lines_of_code=None if np.isnan(loc) else loc,
