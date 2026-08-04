@@ -154,14 +154,14 @@ saves the following to a `plots/` folder:
 
 | Plot | Shows |
 |---|---|
-| `01_topic_distribution.png` | How many forum posts came from each course |
-| `02_urgency_balance.png` | Urgent vs. non-urgent post split |
-| `03_quality_score_distribution.png` | Spread of code quality scores |
-| `04_feature_correlation_heatmap.png` | Correlation between grading features (the leakage check, visualized) |
-| `05_complexity_vs_quality.png` | Does more complex code score higher or lower? |
-| `06_grading_model_comparison.png` | Baseline vs. LightGBM vs. HistGradientBoostingRegressor validation RMSE |
-| `07_urgency_probability_distribution.png` | Predicted urgency probability, split by true label, with the 0.15 threshold marked |
-| `08_threshold_tradeoff.png` | Coverage vs. missed-urgent rate across thresholds — the actual justification for picking 0.15 |
+| `vercel-deploy/plots/01_topic_distribution.png` | How many forum posts came from each course |
+| `vercel-deploy/plots/02_urgency_balance.png` | Urgent vs. non-urgent post split |
+| `vercel-deploy/plots/03_quality_score_distribution.png` | Spread of code quality scores |
+| `vercel-deploy/plots/04_feature_correlation_heatmap.png` | Correlation between grading features (the leakage check, visualized) |
+| `vercel-deploy/plots/05_complexity_vs_quality.png` | Does more complex code score higher or lower? |
+| `vercel-deploy/plots/06_grading_model_comparison.png` | Baseline vs. LightGBM vs. HistGradientBoostingRegressor validation RMSE |
+| `vercel-deploy/plots/07_urgency_probability_distribution.png` | Predicted urgency probability, split by true label, with the 0.15 threshold marked |
+| `vercel-deploy/plots/08_threshold_tradeoff.png` | Coverage vs. missed-urgent rate across thresholds — the actual justification for picking 0.15 |
 
 Once generated, drop the images here:
 
