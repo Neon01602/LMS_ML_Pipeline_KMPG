@@ -1,21 +1,31 @@
-import json
+import joblib
 import numpy as np
 
 
 class PurePythonLGBM:
 
-    def __init__(self, json_path: str):
-        with open(json_path, "r") as f:
-            self.model_data = json.load(f)
-        self.tree_info = self.model_data["tree_info"]
+    def __init__(self, model_path: str, is_joblib: bool = True):
+        if is_joblib:
+            # Load scikit-learn model or pipeline components using joblib
+            self.model_data = joblib.load(model_path)
+        else:
+            import json
+            with open(model_path, "r") as f:
+                self.model_data = json.load(f)
+        
+        # Adjust extraction based on whether it's a raw tree text format or a joblib/json object
+        if isinstance(self.model_data, dict) and "tree_info" in self.model_data:
+            self.tree_info = self.model_data["tree_info"]
+        else:
+            # Handle parsed structure or fallback pipeline elements if applicable
+            self.tree_info = getattr(self.model_data, "tree_info", [])
 
     def _predict_tree(self, node: dict, feature_values: np.ndarray) -> float:
         if "leaf_value" in node:
             return node["leaf_value"]
 
-        feat_idx = node["split_feature"]
+        feat_idx = node.get("split_feature", 0)
 
-        # Safe index check: if feature index is missing, treat as NaN
         if feat_idx < len(feature_values):
             val = feature_values[feat_idx]
         else:
@@ -30,7 +40,7 @@ class PurePythonLGBM:
             )
         else:
             decision_type = node.get("decision_type", "<=")
-            if decision_type == "<=":
+            if decision_type == "<=" or decision_type == 2:
                 is_left = val <= threshold
             else:
                 is_left = val == threshold
@@ -47,8 +57,7 @@ class PurePythonLGBM:
 
         total_score = 0.0
         for tree in self.tree_info:
-            total_score += self._predict_tree(
-                tree["tree_structure"], feature_vector
-            )
+            tree_struct = tree["tree_structure"] if isinstance(tree, dict) else tree
+            total_score += self._predict_tree(tree_struct, feature_vector)
 
         return float(np.clip(total_score, 0.0, 1.0))
