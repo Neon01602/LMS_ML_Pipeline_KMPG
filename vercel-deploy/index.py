@@ -168,39 +168,36 @@ def triage(req: TriageRequest):
     )
 
 
-@app.post("/api/grade", response_model=GradeResponse)
-def grade(req: GradeRequest):
-    if not RADON_AVAILABLE:
-        raise HTTPException(500, "radon not installed on server")
+from feature_extraction import extract_code_features
 
-    try:
-        state = _load_grading()
-    except Exception as e:
-        raise HTTPException(500, f"Grading model failed to load: {type(e).__name__}: {e}")
-    meta = state["metadata"]
+artifact = joblib.load("grading_model_v5.joblib")
+model = artifact["model"]
+imputer = artifact["imputer"]
+feature_cols = artifact["feature_cols"]
+final_feature_idx = artifact["final_feature_idx"]
 
-    complexity = _cyclomatic_complexity(req.code)
-    loc = _lines_of_code(req.code)
-    struct = _code_structural_features(req.code)
+app = FastAPI()
 
+class CodeSubmission(BaseModel):
+    answer: str
+    pass_rate: float
+    test_count: int
+    total_tokens: int
+    def_count: int
+    has_docstring: bool
+
+@app.post("/grade")
+def grade(sub: CodeSubmission):
+    feats = extract_code_features(sub.answer)
     row = {
-        "pass_rate": req.pass_rate if req.pass_rate is not None else np.nan,
-        "test_count": req.test_count if req.test_count is not None else np.nan,
-        "total_tokens": struct["total_tokens"],
-        "def_count": struct["def_count"],
-        "has_docstring": struct["has_docstring"],
-        "cyclomatic_complexity": complexity,
-        "lines_of_code": loc,
+        "pass_rate": sub.pass_rate, "test_count": sub.test_count,
+        "total_tokens": sub.total_tokens, "def_count": sub.def_count,
+        "has_docstring": int(sub.has_docstring), **feats,
     }
-    X = np.array([[row[c] for c in meta["grading_feature_cols"]]], dtype=float)
-    X_imputed = state["grading_imputer"].transform(X)
+    row["tokens_per_def"] = row["total_tokens"] / (row["def_count"] + 1)
+    row["complexity_per_line"] = row["cyclomatic_complexity"] / ((row["lines_of_code"] or 0) + 1)
 
-    raw_pred = float(state["grading_model"].predict(X_imputed)[0])
-    normalized_pred = _normalize_quality_score(raw_pred, meta)
-
-    return GradeResponse(
-        predicted_quality_score=round(normalized_pred, 4),
-        model_used=meta["grading_model_name"],
-        cyclomatic_complexity=None if np.isnan(complexity) else round(complexity, 2),
-        lines_of_code=None if np.isnan(loc) else loc,
-    )
+    x = np.array([[row[c] for c in feature_cols]])
+    x_imputed = imputer.transform(x)[:, final_feature_idx]
+    score = float(model.predict(x_imputed)[0])
+    return {"quality_score": score, "model_version": artifact["winner_name"]}
