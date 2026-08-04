@@ -50,22 +50,20 @@ def _load_triage():
     return _state
 
 
+from lgbm_model_data import LGBM_MODEL_DICT
+
+# Update your PurePythonLGBMRegressor initializer to accept a dictionary directly:
 class PurePythonLGBMRegressor:
-    """Evaluates a LightGBM model directly from its JSON structure without C binaries."""
-    def __init__(self, json_path: str):
-        with open(json_path, "r") as f:
-            data = json.load(f)
-        
+    """Evaluates a LightGBM model directly from a Python dictionary structure without C binaries."""
+    def __init__(self, data: dict):
         self.objective = data.get("objective", "regression")
         self.average_output = data.get("average_output", False)
         self.trees = []
         
-        # Parse tree models from JSON
         if "tree_info" in data:
             for t_info in data["tree_info"]:
                 self.trees.append(t_info.get("tree_structure"))
         
-        # Base score (init_score)
         self.base_score = float(data.get("model_info", {}).get("min_data_per_group", 0.0))
 
     def _predict_tree(self, node: dict, feature_values: np.ndarray) -> float:
@@ -118,15 +116,15 @@ class PurePythonLGBMRegressor:
 
 def _load_grading():
     if "grading_bundle" not in _state:
-        json_path = os.path.join(MODELS_DIR, "lgbm_model.json")
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
 
-        if not os.path.exists(json_path) or not os.path.exists(artifacts_path):
+        if not os.path.exists(artifacts_path):
             raise FileNotFoundError(
-                f"Missing grading files in {MODELS_DIR}. Ensure lgbm_model.json and grading_artifacts.joblib are present."
+                f"Missing grading_artifacts.joblib in {MODELS_DIR}."
             )
 
-        model = PurePythonLGBMRegressor(json_path)
+        # Initialize directly from the imported python dictionary
+        model = PurePythonLGBMRegressor(LGBM_MODEL_DICT)
         artifacts = joblib.load(artifacts_path)
         
         _state["grading_bundle"] = {
@@ -136,7 +134,6 @@ def _load_grading():
             "numeric_with_na": artifacts["numeric_with_na"],
         }
     return _state
-
 
 def _clean_code(text: str) -> str:
     text = str(text).strip()
