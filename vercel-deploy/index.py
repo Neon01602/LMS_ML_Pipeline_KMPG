@@ -314,4 +314,3 @@ def grade(req: GradeRequest):
         cyclomatic_complexity=complexity,
         lines_of_code=loc,
     )
-```[cite: 1]
