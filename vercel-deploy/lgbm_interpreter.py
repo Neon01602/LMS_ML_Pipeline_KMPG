@@ -4,24 +4,26 @@ import numpy as np
 
 class PurePythonLGBM:
 
-    def __init__(self, json_path):
+    def __init__(self, json_path: str):
         with open(json_path, "r") as f:
             self.model_data = json.load(f)
         self.tree_info = self.model_data["tree_info"]
 
-    def _predict_tree(self, node, feature_values):
-        # Leaf node reached: return leaf score value
+    def _predict_tree(self, node: dict, feature_values: np.ndarray) -> float:
         if "leaf_value" in node:
             return node["leaf_value"]
 
         feat_idx = node["split_feature"]
-        val = feature_values[feat_idx]
 
-        # Branching decision
+        # Safe index check: if feature index is missing, treat as NaN
+        if feat_idx < len(feature_values):
+            val = feature_values[feat_idx]
+        else:
+            val = np.nan
+
         threshold = node["threshold"]
         default_left = node.get("default_left", True)
 
-        # Handle NaNs / missing values
         if np.isnan(val):
             next_node = (
                 node["left_child"] if default_left else node["right_child"]
@@ -39,11 +41,7 @@ class PurePythonLGBM:
 
         return self._predict_tree(next_node, feature_values)
 
-    def predict_one(self, feature_vector):
-        """
-        Runs feature array through all decision trees and sums predictions.
-        """
-        # Ensure input is a flat 1D dense array
+    def predict_one(self, feature_vector: np.ndarray) -> float:
         if hasattr(feature_vector, "toarray"):
             feature_vector = feature_vector.toarray().ravel()
 
