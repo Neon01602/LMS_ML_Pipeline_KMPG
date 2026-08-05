@@ -317,7 +317,6 @@ class GradeRequest(BaseModel):
     hours_before_deadline: Optional[float] = Field(None)
     student_avg_past_score: Optional[float] = Field(None)
 
-
 class GradeResponse(BaseModel):
     predicted_quality_score: float
     model_used: str
@@ -414,11 +413,10 @@ def grade(req: GradeRequest):
     for idx, col in enumerate(numeric_with_na):
         features_dict[col] = imputed_array[0][idx]
 
-    # Build the vector in the booster's own split_feature index order.
     X_input = [[features_dict.get(col, 0.0) for col in LGBM_FEATURE_ORDER]]
 
-    raw_score_0_100 = float(model.predict(X_input)[0])  # already clipped to [0, 100]
-    final_score = round(raw_score_0_100 / 100.0, 4)      # normalize to [0, 1]
+    raw_score_0_100 = float(model.predict(X_input)[0])   # clipped to [0, 100] inside model.predict
+    final_score = round(raw_score_0_100 / 100.0, 4)       # normalize to [0, 1]
 
     computed_complexity = float(features_dict["cyclomatic_complexity"])
     computed_lines = float(features_dict["lines_of_code"])
