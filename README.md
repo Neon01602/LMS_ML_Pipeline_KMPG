@@ -2,7 +2,7 @@
 
 An ML pipeline for a Learning Management System (LMS) that does two jobs:
 
-1. **Grades code submissions** — predicts a continuous quality score using AST structural metrics, surface-level code ratios, and dual-token TF-IDF features.
+1. **Grades code submissions** — predicts a continuous quality score using AST structural metrics, surface-level code ratios, and (at training time) dual-token TF-IDF features.
 2. **Triages student doubts** — classifies forum posts by course topic and determines urgency for confidence-gated queue escalation.
 
 The triage system uses an asymmetric decision rule: instead of simply classifying urgent vs. non-urgent, it only **auto-handles** a post when it's confident the post is *NOT* urgent. Anything uncertain — or confidently urgent — is escalated to a human instructor. This asymmetry is deliberate: missing a genuinely urgent doubt is far more costly than a teacher reviewing one extra doubt that turns out to be fine.
@@ -12,7 +12,7 @@ The triage system uses an asymmetric decision rule: instead of simply classifyin
 ## Prerequisites
 
 - Python 3.9+
-- Internet access (datasets pulled live from GitHub and Hugging Face)
+- Internet access (datasets pulled live from GitHub and Hugging Face) — training only, not required at inference
 - Packages:
   ```bash
   pip install -q lightgbm scikit-learn pandas numpy joblib scipy radon
@@ -52,7 +52,7 @@ Real student discussion posts from **9 Stanford MOOC courses** (accounting, calc
 
 ---
 
-## Feature Engineering (Grading)
+## Feature Engineering (Grading — Training Pipeline)
 
 Target undergoes normalization + rank transformation to correct for density clustering around central `quality_score` values:
 
@@ -60,7 +60,9 @@ $$\text{target\_raw} = \text{clip}\left(\frac{\text{quality\_score} - 15.1}{15.3
 
 $$y = \text{RankTransform}(\text{target\_raw})$$
 
-The LightGBM grading engine uses a **1,018-dimensional** sparse feature set:
+`RankTransform` here is a **percentile rank (0–100 scale)**, not a 0–1 probability — this matters at inference time (see [Serving Format](#serving-format--inference-only-feature-subset) below), since the deployed booster's raw output lands in roughly the 0–100 range, not 0–1.
+
+The full training pipeline builds a **1,018-dimensional** sparse feature set:
 
 **AST structural metrics (16 features)**
 - Node count, depth, function/class defs, loop constructs
@@ -82,123 +84,80 @@ Cyclomatic complexity and line counts are computed via `radon`. Rows that fail t
 
 ---
 
+## Serving Format — Inference-Only Feature Subset
+
+**Important discrepancy between training and deployment:** the model actually shipped to `/api/grade` (via the raw LightGBM text dump, e.g. `lgbm_model.txt` / `lgbm_model_data.py`) is trained on a **15-feature subset only** — the 1,018-dimensional TF-IDF-augmented feature set above describes the full training/experimentation pipeline, but the exported booster's `feature_names=` header lists just:
+
+```
+test_pass_rate, cyclomatic_complexity, lines_of_code, num_functions,
+runtime_ms, memory_kb, num_compile_errors, num_warnings, comment_density,
+num_attempts, hours_before_deadline, student_avg_past_score,
+runtime_ms_missing, memory_kb_missing, comment_density_missing
+```
+
+This is the **exact positional order** the pure-Python tree evaluator indexes against via each node's `split_feature` integer — it does not do name-based lookup. Any inference wrapper must build the feature vector in this order, regardless of what order feature engineering code produces internally.
+
+**Target scale at inference:** the booster's raw summed output is on a **0–100 scale** (consistent with the percentile-rank training target above), not 0–1. Serving code should:
+1. Sum all tree outputs (the root tree carries `shrinkage=1` and starts near the population mean, ~59–60; subsequent trees are `shrinkage=0.03` residual corrections).
+2. Clip the sum to `[0, 100]`.
+3. Divide by 100 if a `[0, 1]` score is required downstream (e.g. to match a `predicted_quality_score` API contract).
+
+Clipping to `[0, 1]` *before* this normalization silently saturates almost every real prediction to `1.0` and was a production bug in earlier deployments — see inline comments in `PurePythonLGBMRegressor.predict()`.
+
+Missing-value routing (`default_left`) is currently hardcoded to `True` for every node in the pure-Python evaluator rather than reading LightGBM's per-node default-direction bit. This only affects predictions where a feature is genuinely `NaN` post-imputation, which the current pipeline avoids by imputing upstream — flagged here as a known limitation, not yet fixed.
+
+---
+
 ## Models
 
 | Task | Model | Notes |
 |---|---|---|
-| Code grading | **Enhanced LightGBM Regressor** | AST + surface + dual TF-IDF features, quantile rank target scaling |
+| Code grading | **Enhanced LightGBM Regressor** | Trained on AST + surface + dual TF-IDF features (1,018-dim); **deployed booster uses the 15-feature AST/surface/metadata subset only** (no TF-IDF at inference), percentile-rank (0–100) target scaling |
 | Topic triage | Logistic Regression (TF-IDF), `class_weight="balanced"` | 9-class classification |
-| Urgency triage | Logistic Regression + `CalibratedClassifierCV` (sigmoid) | Calibration matters because routing depends on trustworthy probabilities, not just the label |
-| Escalation routing | Confidence threshold (`P(urgent) < 0.15`) | Auto-handle only below threshold |
+| Urgency triage | Logistic Regression (TF-IDF), `class_weight="balanced"` | Binary, asymmetric confidence-gated decision rule |
 
-### Routing rule
+### Deployed model artifacts (`models/`)
 
-Auto-handle a doubt only when `P(urgent) < 0.15`, chosen by sweeping the threshold on the validation set: below it, too few doubts get auto-handled to be useful; above it, the share of auto-handled doubts that were actually urgent climbs past 6–7% and keeps rising.
-
----
-
-## Results
-
-| Task | Model | Metric | Score |
-|---|---|---|---|
-| Code grading | Enhanced LightGBM Regressor | Test R² | 0.4309 |
-| Code grading | Enhanced LightGBM Regressor | Test RMSE | 0.1791 |
-| Code grading | Enhanced LightGBM Regressor | Test MAE | 0.1038 |
-| Topic triage | Balanced Logistic Regression (TF-IDF) | Val Macro-F1 | 0.6670 |
-| Urgency triage | Calibrated Logistic Regression (Sigmoid) | Val Macro-F1 | 0.7030 |
-| Escalation routing | Confidence threshold (P < 0.15) | Auto-handle coverage / missed urgency | 59.3% / 5.92% |
-
-Min predicted quality score: 0.0159 · Max predicted quality score: 0.9629
-
----
-
-## Visualizations
-
-The notebook includes a plotting cell (`generate_plots.py` in this repo — paste it in as a new cell after the grading and triage cells have run) that saves the following to a `plots/` folder:
-
-| Plot | Shows |
+| File | Purpose |
 |---|---|
-| `01_topic_distribution.png` | How many forum posts came from each course |
-| `02_urgency_balance.png` | Urgent vs. non-urgent post split |
-| `03_quality_score_distribution.png` | Spread of code quality scores |
-| `04_feature_correlation_heatmap.png` | Correlation between grading features (the leakage check, visualized) |
-| `05_complexity_vs_quality.png` | Does more complex code score higher or lower? |
-| `06_grading_model_comparison.png` | Baseline vs. LightGBM validation RMSE |
-| `07_urgency_probability_distribution.png` | Predicted urgency probability, split by true label, with the 0.15 threshold marked |
-| `08_threshold_tradeoff.png` | Coverage vs. missed-urgent rate across thresholds — the actual justification for picking 0.15 |
+| `lgbm_model.json` / `lgbm_model_trees.json` (or `lgbm_model_data.py` `LGBM_MODEL_TEXT`) | Raw LightGBM text-format model dump, parsed by a pure-Python evaluator (no native `lightgbm` runtime dependency at serve time) |
+| `grading_artifacts.joblib` | `feature_cols`, fitted `imputer`, `numeric_with_na` — used to impute `runtime_ms` / `memory_kb` / `comment_density` before scoring |
+| `tfidf_vectorizer.pkl` | Fitted TF-IDF vectorizer for triage text |
+| `topic_classifier.pkl` | 9-class topic classifier (expects vectorized text, not raw strings) |
+| `urgency_classifier.pkl` | Binary urgency classifier (expects vectorized text, not raw strings) |
+| `tfidf_and_features.joblib` | Combined vectorizer + any additional engineered features used during triage training (if present, must be concatenated with TF-IDF output before calling `.predict()`) |
+| `metadata.json` | Serving metadata, including `confidence_threshold` for the urgency auto-handle gate |
 
-Once generated, drop the images here:
-
-![Topic distribution](vercel-deploy/plots/01_topic_distribution.png)
-![Urgency balance](vercel-deploy/plots/02_urgency_balance.png)
-![Quality score distribution](vercel-deploy/plots/03_quality_score_distribution.png)
-![Feature correlation](vercel-deploy/plots/04_feature_correlation_heatmap.png)
-![Complexity vs quality](vercel-deploy/plots/05_complexity_vs_quality.png)
-![Grading model comparison](vercel-deploy/plots/06_grading_model_comparison.png)
-![Urgency probability distribution](vercel-deploy/plots/07_urgency_probability_distribution.png)
-![Threshold tradeoff](vercel-deploy/plots/08_threshold_tradeoff.png)
+There is **no single bundled `triage_models.joblib`** — the triage pipeline is served by loading `tfidf_vectorizer.pkl`, `topic_classifier.pkl`, and `urgency_classifier.pkl` independently and vectorizing `post_text` before calling `.predict()` / `.predict_proba()` on each.
 
 ---
 
-## Live API
+## API
 
 ### `POST /api/grade`
 
-Evaluates raw Python code against the trained AST-LightGBM pipeline artifact (`code_grading_lgbm.joblib`).
-
-**Request**
 ```json
 {
-  "code": "def fibonacci(n:\n    \"\"\"Calculate nth Fibonacci number.\"\"\"\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
+  "code": "def add(a, b):\n    return a + b",
   "pass_rate": 1.0,
-  "test_count": 10
+  "test_count": 10,
+  "runtime_ms": 12,
+  "memory_kb": 300,
+  "comment_density": 0.1,
+  "num_attempts": 1,
+  "hours_before_deadline": 48,
+  "student_avg_past_score": 92
 }
 ```
 
-**Response**
-```json
-{
-  "predicted_quality_score": 0.8842,
-  "ast_cyclomatic_complexity": 3,
-  "ast_depth": 4,
-  "syntax_valid": 1,
-  "model_version": "code_grading_lgbm_v2"
-}
-```
+Returns a `predicted_quality_score` in `[0, 1]` (normalized from the model's native 0–100 scale), plus `cyclomatic_complexity` and `lines_of_code` computed via `radon` where available.
 
 ### `POST /api/triage`
 
-Classifies a student doubt by topic and urgency, and returns the routing decision.
-
-**Request**
 ```json
 {
-  "post_text": "I keep getting an IndexOutOfBounds error on line 42 when passing an empty array, assignment due in 10 mins!"
+  "post_text": "I'm confused about how gradient descent updates the weights in backpropagation"
 }
 ```
 
-**Response**
-```json
-{
-  "predicted_topic": "cs106a",
-  "urgency_probability": 0.8412,
-  "auto_handle": false,
-  "threshold_used": 0.15
-}
-```
-
----
-
-## Artifact Export
-
-The trained model and vectorizers are serialized for inference into `code_grading_lgbm.joblib`:
-
-```python
-import joblib
-
-artifact = joblib.load("code_grading_lgbm.joblib")
-model = artifact["model"]
-tfidf_char = artifact["tfidf_char"]
-tfidf_word = artifact["tfidf_word"]
-feature_names = artifact["feature_names"]
-```
+Returns `predicted_topic`, `urgency_probability`, `auto_handle` (`true` only when the model is confident the post is *not* urgent, per the asymmetric threshold in `metadata.json`), and `threshold_used`.
