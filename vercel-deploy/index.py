@@ -42,10 +42,19 @@ def _load_metadata():
 
 def _load_triage():
     if "triage_bundle" not in _state:
-        _state["triage_bundle"] = joblib.load(
-            os.path.join(MODELS_DIR, "triage_models.joblib")
-        )
-    _load_metadata()
+        vectorizer = joblib.load(os.path.join(MODELS_DIR, "tfidf_vectorizer.pkl"))
+        topic_model = joblib.load(os.path.join(MODELS_DIR, "topic_classifier.pkl"))
+        urgency_model = joblib.load(os.path.join(MODELS_DIR, "urgency_classifier.pkl"))
+
+        metadata = _load_metadata()
+        confidence_threshold = metadata.get("confidence_threshold", 0.5)
+
+        _state["triage_bundle"] = {
+            "vectorizer": vectorizer,
+            "topic_model": topic_model,
+            "urgency_model": urgency_model,
+            "confidence_threshold": confidence_threshold,
+        }
     return _state
 
 
