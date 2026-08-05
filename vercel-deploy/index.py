@@ -157,6 +157,11 @@ class PurePythonLGBMRegressor:
 # can NEVER crash the whole app / triage endpoint at import time.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Grading model loading — isolated so a broken lgbm_model_data.py
+# can NEVER crash the whole app / triage endpoint at import time.
+# ---------------------------------------------------------------------------
+
 _GRADING_IMPORT_ERROR = None
 
 
