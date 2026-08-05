@@ -323,11 +323,6 @@ class GradeResponse(BaseModel):
     model_used: str
     cyclomatic_complexity: Optional[float]
     lines_of_code: Optional[float]
-    # --- TEMPORARY DEBUG FIELDS: remove once the scoring bug is confirmed fixed ---
-    debug_raw_score: Optional[float] = None
-    debug_feature_vector: Optional[dict] = None
-    debug_imputed_values: Optional[dict] = None
-
 
 @app.get("/")
 @app.get("/api")
