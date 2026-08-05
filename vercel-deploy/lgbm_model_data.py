@@ -1,6 +1,6 @@
 # lgbm_model_data.py
 import textwrap
-LGBM_MODEL_DICT=textwrap.dedent(r"""tree
+LGBM_MODEL_TEXT=textwrap.dedent(r"""tree
         version=v4
         num_class=1
         num_tree_per_iteration=1
