@@ -336,22 +336,25 @@ def health():
 
 @app.post("/api/triage", response_model=TriageResponse)
 def triage(req: TriageRequest):
-    state = _load_triage()
-    triage_bundle = state["triage_bundle"]
-    topic_model = triage_bundle["topic_model"]
-    urgency_model = triage_bundle["urgency_model"]
-    threshold = triage_bundle["confidence_threshold"]
+    try:
+        state = _load_triage()
+        triage_bundle = state["triage_bundle"]
+        topic_model = triage_bundle["topic_model"]
+        urgency_model = triage_bundle["urgency_model"]
+        threshold = triage_bundle["confidence_threshold"]
 
-    predicted_topic = topic_model.predict([req.post_text])[0]
-    urg_proba = urgency_model.predict_proba([req.post_text])[0]
-    max_urgency_proba = float(urg_proba.max())
+        predicted_topic = topic_model.predict([req.post_text])[0]
+        urg_proba = urgency_model.predict_proba([req.post_text])[0]
+        max_urgency_proba = float(urg_proba.max())
 
-    return TriageResponse(
-        predicted_topic=predicted_topic,
-        urgency_probability=round(max_urgency_proba, 4),
-        auto_handle=max_urgency_proba >= threshold,
-        threshold_used=threshold,
-    )
+        return TriageResponse(
+            predicted_topic=predicted_topic,
+            urgency_probability=round(max_urgency_proba, 4),
+            auto_handle=max_urgency_proba >= threshold,
+            threshold_used=threshold,
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Triage failed: {type(e).__name__}: {e}")
 
 
 # ---------------------------------------------------------------------------
