@@ -139,7 +139,7 @@ class PurePythonLGBMRegressor:
 
         return self._predict_tree(next_node, x)
 
-    def predict(self, X):
+    def predict(self, X, clip=True):
         predictions = []
         for x in X:
             if hasattr(x, "toarray"):
@@ -148,7 +148,7 @@ class PurePythonLGBMRegressor:
             total = self.base_score
             for tree in self.trees:
                 total += self._predict_tree(tree, x_arr)
-            predictions.append(float(np.clip(total, 0.0, 1.0)))
+            predictions.append(float(np.clip(total, 0.0, 1.0)) if clip else float(total))
         return np.array(predictions)
 
 
@@ -324,6 +324,10 @@ class GradeResponse(BaseModel):
     model_used: str
     cyclomatic_complexity: Optional[float]
     lines_of_code: Optional[float]
+    # --- TEMPORARY DEBUG FIELDS: remove once the scoring bug is confirmed fixed ---
+    debug_raw_score: Optional[float] = None
+    debug_feature_vector: Optional[dict] = None
+    debug_imputed_values: Optional[dict] = None
 
 
 @app.get("/")
@@ -379,7 +383,6 @@ LGBM_FEATURE_ORDER = [
     "comment_density_missing",
 ]
 
-
 @app.post("/api/grade", response_model=GradeResponse)
 def grade(req: GradeRequest):
     try:
@@ -414,14 +417,19 @@ def grade(req: GradeRequest):
         row_values.append(np.nan if val is None else val)
 
     imputed_array = imputer.transform([row_values])
+    debug_imputed = {}
     for idx, col in enumerate(numeric_with_na):
         features_dict[col] = imputed_array[0][idx]
+        debug_imputed[col] = float(imputed_array[0][idx])
 
     # Build the vector in the booster's own index order, NOT feature_cols.
     X_input = [[features_dict.get(col, 0.0) for col in LGBM_FEATURE_ORDER]]
+    debug_vector = dict(zip(LGBM_FEATURE_ORDER, X_input[0]))
 
-    raw_predicted_score = float(model.predict(X_input)[0])
-    final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
+    # >>> PASTE THE TWO LINES HERE, replacing the old raw_predicted_score/final_score <
+    raw_unclipped = float(model.predict(X_input, clip=False)[0])
+    final_score = float(np.clip(raw_unclipped, 0.0, 1.0))
+    # >>> END PASTE <
 
     computed_complexity = float(features_dict["cyclomatic_complexity"])
     computed_lines = float(features_dict["lines_of_code"])
@@ -442,4 +450,7 @@ def grade(req: GradeRequest):
         model_used="lgbm_model.txt (pure-python parser)",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
+        debug_raw_score=raw_unclipped,
+        debug_feature_vector=debug_vector,
+        debug_imputed_values=debug_imputed,
     )
