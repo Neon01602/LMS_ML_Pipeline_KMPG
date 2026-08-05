@@ -1,5 +1,5 @@
 # lgbm_model_data.py
-
+import textwrap
 LGBM_MODEL_DICT=textwrap.dedent(r"""tree
         version=v4
         num_class=1
