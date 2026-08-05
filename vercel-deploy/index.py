@@ -111,8 +111,6 @@ def _build_tree_struct(tree: dict, node_idx: int) -> dict:
 
 
 class PurePythonLGBMRegressor:
-    """Evaluates a LightGBM model parsed from the raw text dump, no native lib."""
-
     def __init__(self, model_text: str):
         raw_trees = _parse_lgbm_text(model_text)
         if not raw_trees:
@@ -121,7 +119,7 @@ class PurePythonLGBMRegressor:
                 "or malformed. Check lgbm_model_data.py generation."
             )
         self.trees = [_build_tree_struct(t, 0) for t in raw_trees]
-        self.base_score = 0.0
+        self.base_score = 0.0  # Tree=0 (shrinkage=1) already carries the base level
 
     def _predict_tree(self, node: dict, x: np.ndarray) -> float:
         if "leaf_value" in node:
@@ -148,7 +146,8 @@ class PurePythonLGBMRegressor:
             total = self.base_score
             for tree in self.trees:
                 total += self._predict_tree(tree, x_arr)
-            predictions.append(float(np.clip(total, 0.0, 1.0)) if clip else float(total))
+            # Target scale is 0-100 (percentage/quality score), NOT 0-1.
+            predictions.append(float(np.clip(total, 0.0, 100.0)) if clip else float(total))
         return np.array(predictions)
 
 
@@ -417,19 +416,14 @@ def grade(req: GradeRequest):
         row_values.append(np.nan if val is None else val)
 
     imputed_array = imputer.transform([row_values])
-    debug_imputed = {}
     for idx, col in enumerate(numeric_with_na):
         features_dict[col] = imputed_array[0][idx]
-        debug_imputed[col] = float(imputed_array[0][idx])
 
-    # Build the vector in the booster's own index order, NOT feature_cols.
+    # Build the vector in the booster's own split_feature index order.
     X_input = [[features_dict.get(col, 0.0) for col in LGBM_FEATURE_ORDER]]
-    debug_vector = dict(zip(LGBM_FEATURE_ORDER, X_input[0]))
 
-    # >>> PASTE THE TWO LINES HERE, replacing the old raw_predicted_score/final_score <
-    raw_unclipped = float(model.predict(X_input, clip=False)[0])
-    final_score = float(np.clip(raw_unclipped, 0.0, 1.0))
-    # >>> END PASTE <
+    raw_score_0_100 = float(model.predict(X_input)[0])  # already clipped to [0, 100]
+    final_score = round(raw_score_0_100 / 100.0, 4)      # normalize to [0, 1]
 
     computed_complexity = float(features_dict["cyclomatic_complexity"])
     computed_lines = float(features_dict["lines_of_code"])
@@ -446,11 +440,8 @@ def grade(req: GradeRequest):
             pass
 
     return GradeResponse(
-        predicted_quality_score=round(final_score, 4),
+        predicted_quality_score=final_score,
         model_used="lgbm_model.txt (pure-python parser)",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
-        debug_raw_score=raw_unclipped,
-        debug_feature_vector=debug_vector,
-        debug_imputed_values=debug_imputed,
     )
