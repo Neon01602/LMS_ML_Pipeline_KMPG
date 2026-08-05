@@ -54,9 +54,6 @@ def _load_triage():
 # ---------------------------------------------------------------------------
 
 def _parse_lgbm_text(text: str) -> list:
-    """Parse a raw LightGBM text-model dump into a list of tree dicts,
-    each with arrays: split_feature, threshold, decision_type,
-    left_child, right_child, leaf_value, default_left (derived)."""
     lines = [ln.strip() for ln in text.splitlines()]
     trees = []
     current = None
@@ -84,32 +81,24 @@ def _parse_lgbm_text(text: str) -> list:
         key = key.strip()
         val = val.strip()
 
-        if key in (
-            "split_feature", "decision_type", "left_child", "right_child",
-        ):
+        if key in ("split_feature", "decision_type", "left_child", "right_child"):
             current[key] = [int(v) for v in val.split()]
         elif key in ("threshold", "leaf_value"):
             current[key] = [float(v) for v in val.split()]
         elif key == "num_leaves":
             current["num_leaves"] = int(val)
-        # other keys (split_gain, leaf_weight, internal_value, etc.) ignored
 
     flush()
     return trees
 
 
 def _build_tree_struct(tree: dict, node_idx: int) -> dict:
-    """Recursively build a nested node dict from LightGBM's flat
-    left_child/right_child index arrays. Negative indices are leaves
-    encoded as -(leaf_index)-1."""
     if node_idx < 0:
         leaf_idx = -(node_idx + 1)
         return {"leaf_value": tree["leaf_value"][leaf_idx]}
 
     decision_type = tree["decision_type"][node_idx]
-    # bit 0 of decision_type: 1 = categorical, 0 = numerical (<=)
-    # we only support numerical (<=) splits, matching decision_type=2 pattern seen in dump
-    default_left = True  # LightGBM default; missing values go left unless specified otherwise
+    default_left = True
 
     return {
         "split_feature": tree["split_feature"][node_idx],
@@ -126,8 +115,13 @@ class PurePythonLGBMRegressor:
 
     def __init__(self, model_text: str):
         raw_trees = _parse_lgbm_text(model_text)
+        if not raw_trees:
+            raise ValueError(
+                "Parsed 0 trees from LGBM_MODEL_TEXT — the text dump is empty "
+                "or malformed. Check lgbm_model_data.py generation."
+            )
         self.trees = [_build_tree_struct(t, 0) for t in raw_trees]
-        self.base_score = 0.0  # LightGBM regression models start from 0, not min_data_per_group
+        self.base_score = 0.0
 
     def _predict_tree(self, node: dict, x: np.ndarray) -> float:
         if "leaf_value" in node:
@@ -158,7 +152,24 @@ class PurePythonLGBMRegressor:
         return np.array(predictions)
 
 
-from lgbm_model_data import LGBM_MODEL_TEXT
+# ---------------------------------------------------------------------------
+# Grading model loading — isolated so a broken lgbm_model_data.py
+# can NEVER crash the whole app / triage endpoint at import time.
+# ---------------------------------------------------------------------------
+
+_GRADING_IMPORT_ERROR = None
+
+
+def _get_lgbm_model_text():
+    """Lazily import LGBM_MODEL_TEXT so import errors surface as a clean
+    500 on /api/grade instead of killing the entire serverless function."""
+    global _GRADING_IMPORT_ERROR
+    try:
+        from lgbm_model_data import LGBM_MODEL_TEXT
+        return LGBM_MODEL_TEXT
+    except Exception as e:
+        _GRADING_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+        raise
 
 
 def _load_grading():
@@ -167,7 +178,8 @@ def _load_grading():
         if not os.path.exists(artifacts_path):
             raise FileNotFoundError(f"Missing grading_artifacts.joblib in {MODELS_DIR}.")
 
-        model = PurePythonLGBMRegressor(LGBM_MODEL_TEXT)
+        model_text = _get_lgbm_model_text()
+        model = PurePythonLGBMRegressor(model_text)
         artifacts = joblib.load(artifacts_path)
 
         _state["grading_bundle"] = {
@@ -345,7 +357,10 @@ def grade(req: GradeRequest):
     try:
         state = _load_grading()
     except Exception as e:
-        raise HTTPException(500, f"Grading initialization failed: {type(e).__name__}: {e}")
+        detail = f"Grading initialization failed: {type(e).__name__}: {e}"
+        if _GRADING_IMPORT_ERROR:
+            detail += f" | lgbm_model_data import error: {_GRADING_IMPORT_ERROR}"
+        raise HTTPException(500, detail)
 
     bundle = state["grading_bundle"]
     model = bundle["model"]
@@ -399,4 +414,4 @@ def grade(req: GradeRequest):
         model_used="lgbm_model.txt (pure-python parser)",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
-            )
+    )
