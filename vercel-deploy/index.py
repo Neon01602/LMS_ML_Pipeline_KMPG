@@ -338,13 +338,16 @@ def health():
 def triage(req: TriageRequest):
     try:
         state = _load_triage()
-        triage_bundle = state["triage_bundle"]
-        topic_model = triage_bundle["topic_model"]
-        urgency_model = triage_bundle["urgency_model"]
-        threshold = triage_bundle["confidence_threshold"]
+        bundle = state["triage_bundle"]
+        vectorizer = bundle["vectorizer"]
+        topic_model = bundle["topic_model"]
+        urgency_model = bundle["urgency_model"]
+        threshold = bundle["confidence_threshold"]
 
-        predicted_topic = topic_model.predict([req.post_text])[0]
-        urg_proba = urgency_model.predict_proba([req.post_text])[0]
+        X_vec = vectorizer.transform([req.post_text])
+
+        predicted_topic = topic_model.predict(X_vec)[0]
+        urg_proba = urgency_model.predict_proba(X_vec)[0]
         max_urgency_proba = float(urg_proba.max())
 
         return TriageResponse(
