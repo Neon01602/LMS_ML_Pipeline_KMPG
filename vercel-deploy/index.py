@@ -357,6 +357,29 @@ def triage(req: TriageRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# Canonical order the LightGBM booster indexes split_feature against.
+# MUST match the "feature_names=" line in the LGBM text dump exactly.
+# ---------------------------------------------------------------------------
+LGBM_FEATURE_ORDER = [
+    "test_pass_rate",
+    "cyclomatic_complexity",
+    "lines_of_code",
+    "num_functions",
+    "runtime_ms",
+    "memory_kb",
+    "num_compile_errors",
+    "num_warnings",
+    "comment_density",
+    "num_attempts",
+    "hours_before_deadline",
+    "student_avg_past_score",
+    "runtime_ms_missing",
+    "memory_kb_missing",
+    "comment_density_missing",
+]
+
+
 @app.post("/api/grade", response_model=GradeResponse)
 def grade(req: GradeRequest):
     try:
@@ -369,7 +392,6 @@ def grade(req: GradeRequest):
 
     bundle = state["grading_bundle"]
     model = bundle["model"]
-    feature_cols = bundle["feature_cols"]
     imputer = bundle["imputer"]
     numeric_with_na = bundle["numeric_with_na"]
 
@@ -395,7 +417,8 @@ def grade(req: GradeRequest):
     for idx, col in enumerate(numeric_with_na):
         features_dict[col] = imputed_array[0][idx]
 
-    X_input = [[features_dict.get(col, 0.0) for col in feature_cols]]
+    # Build the vector in the booster's own index order, NOT feature_cols.
+    X_input = [[features_dict.get(col, 0.0) for col in LGBM_FEATURE_ORDER]]
 
     raw_predicted_score = float(model.predict(X_input)[0])
     final_score = float(np.clip(raw_predicted_score, 0.0, 1.0))
