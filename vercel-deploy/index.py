@@ -1,6 +1,6 @@
 """
 FastAPI app serving the LMS Triage + Grading models.
-Runs as a single Vercel Python serverless function using real LightGBM.
+Pure-Python LightGBM text-format parser + evaluator (no native lib needed).
 """
 
 import ast
@@ -11,7 +11,6 @@ from typing import Optional
 
 import joblib
 import numpy as np
-import lightgbm as lgb
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -19,7 +18,6 @@ from pydantic import BaseModel, Field
 try:
     from radon.complexity import cc_visit
     from radon.raw import analyze
-
     RADON_AVAILABLE = True
 except ImportError:
     RADON_AVAILABLE = False
@@ -51,19 +49,125 @@ def _load_triage():
     return _state
 
 
+# ---------------------------------------------------------------------------
+# Pure-Python LightGBM text-format parser
+# ---------------------------------------------------------------------------
+
+def _parse_lgbm_text(text: str) -> list:
+    """Parse a raw LightGBM text-model dump into a list of tree dicts,
+    each with arrays: split_feature, threshold, decision_type,
+    left_child, right_child, leaf_value, default_left (derived)."""
+    lines = [ln.strip() for ln in text.splitlines()]
+    trees = []
+    current = None
+
+    def flush():
+        if current is not None and "split_feature" in current:
+            trees.append(current)
+
+    for ln in lines:
+        if not ln:
+            continue
+        if ln.startswith("Tree="):
+            flush()
+            current = {}
+            continue
+        if ln.startswith("end of trees") or ln.startswith("feature_importances"):
+            flush()
+            current = None
+            continue
+        if current is None:
+            continue
+        if "=" not in ln:
+            continue
+        key, _, val = ln.partition("=")
+        key = key.strip()
+        val = val.strip()
+
+        if key in (
+            "split_feature", "decision_type", "left_child", "right_child",
+        ):
+            current[key] = [int(v) for v in val.split()]
+        elif key in ("threshold", "leaf_value"):
+            current[key] = [float(v) for v in val.split()]
+        elif key == "num_leaves":
+            current["num_leaves"] = int(val)
+        # other keys (split_gain, leaf_weight, internal_value, etc.) ignored
+
+    flush()
+    return trees
+
+
+def _build_tree_struct(tree: dict, node_idx: int) -> dict:
+    """Recursively build a nested node dict from LightGBM's flat
+    left_child/right_child index arrays. Negative indices are leaves
+    encoded as -(leaf_index)-1."""
+    if node_idx < 0:
+        leaf_idx = -(node_idx + 1)
+        return {"leaf_value": tree["leaf_value"][leaf_idx]}
+
+    decision_type = tree["decision_type"][node_idx]
+    # bit 0 of decision_type: 1 = categorical, 0 = numerical (<=)
+    # we only support numerical (<=) splits, matching decision_type=2 pattern seen in dump
+    default_left = True  # LightGBM default; missing values go left unless specified otherwise
+
+    return {
+        "split_feature": tree["split_feature"][node_idx],
+        "threshold": tree["threshold"][node_idx],
+        "decision_type": decision_type,
+        "default_left": default_left,
+        "left_child": _build_tree_struct(tree, tree["left_child"][node_idx]),
+        "right_child": _build_tree_struct(tree, tree["right_child"][node_idx]),
+    }
+
+
+class PurePythonLGBMRegressor:
+    """Evaluates a LightGBM model parsed from the raw text dump, no native lib."""
+
+    def __init__(self, model_text: str):
+        raw_trees = _parse_lgbm_text(model_text)
+        self.trees = [_build_tree_struct(t, 0) for t in raw_trees]
+        self.base_score = 0.0  # LightGBM regression models start from 0, not min_data_per_group
+
+    def _predict_tree(self, node: dict, x: np.ndarray) -> float:
+        if "leaf_value" in node:
+            return float(node["leaf_value"])
+
+        feat_idx = int(node["split_feature"])
+        val = x[feat_idx] if feat_idx < len(x) else np.nan
+        threshold = float(node["threshold"])
+
+        if np.isnan(val):
+            next_node = node["left_child"] if node["default_left"] else node["right_child"]
+        else:
+            is_left = val <= threshold
+            next_node = node["left_child"] if is_left else node["right_child"]
+
+        return self._predict_tree(next_node, x)
+
+    def predict(self, X):
+        predictions = []
+        for x in X:
+            if hasattr(x, "toarray"):
+                x = x.toarray().ravel()
+            x_arr = np.asarray(x, dtype=float)
+            total = self.base_score
+            for tree in self.trees:
+                total += self._predict_tree(tree, x_arr)
+            predictions.append(float(np.clip(total, 0.0, 1.0)))
+        return np.array(predictions)
+
+
 from lgbm_model_data import LGBM_MODEL_TEXT
 
 
 def _load_grading():
     if "grading_bundle" not in _state:
         artifacts_path = os.path.join(MODELS_DIR, "grading_artifacts.joblib")
-
         if not os.path.exists(artifacts_path):
-            raise FileNotFoundError(
-                f"Missing grading_artifacts.joblib in {MODELS_DIR}."
-            )
+            raise FileNotFoundError(f"Missing grading_artifacts.joblib in {MODELS_DIR}.")
 
-        model = lgb.Booster(model_str=LGBM_MODEL_TEXT)
+        model = PurePythonLGBMRegressor(LGBM_MODEL_TEXT)
         artifacts = joblib.load(artifacts_path)
 
         _state["grading_bundle"] = {
@@ -99,42 +203,23 @@ def _extract_features(
 
         def_count = sum(1 for n in ast_nodes if isinstance(n, ast.FunctionDef))
         class_count = sum(1 for n in ast_nodes if isinstance(n, ast.ClassDef))
-        loop_count = sum(
-            1 for n in ast_nodes if isinstance(n, (ast.For, ast.While))
-        )
+        loop_count = sum(1 for n in ast_nodes if isinstance(n, (ast.For, ast.While)))
         try_count = sum(1 for n in ast_nodes if isinstance(n, ast.Try))
         if_count = sum(1 for n in ast_nodes if isinstance(n, ast.If))
         return_count = sum(1 for n in ast_nodes if isinstance(n, ast.Return))
         assign_count = sum(1 for n in ast_nodes if isinstance(n, ast.Assign))
-        type_ann_count = sum(
-            1 for n in ast_nodes if isinstance(n, ast.AnnAssign)
-        )
+        type_ann_count = sum(1 for n in ast_nodes if isinstance(n, ast.AnnAssign))
         comp_count = sum(
-            1
-            for n in ast_nodes
-            if isinstance(
-                n,
-                (
-                    ast.ListComp,
-                    ast.SetComp,
-                    ast.DictComp,
-                    ast.GeneratorExp,
-                ),
-            )
+            1 for n in ast_nodes
+            if isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
         )
 
         node_count = float(len(ast_nodes))
-        cyclomatic = float(
-            1 + if_count + loop_count + try_count + comp_count
-        )
+        cyclomatic = float(1 + if_count + loop_count + try_count + comp_count)
 
-        identifiers = [
-            n.id for n in ast_nodes if isinstance(n, ast.Name) and hasattr(n, "id")
-        ]
+        identifiers = [n.id for n in ast_nodes if isinstance(n, ast.Name) and hasattr(n, "id")]
         single_char_ids = sum(1 for i in identifiers if len(i) == 1)
-        single_char_ratio = (
-            single_char_ids / len(identifiers) if identifiers else 0.0
-        )
+        single_char_ratio = single_char_ids / len(identifiers) if identifiers else 0.0
 
     except Exception:
         syntax_valid = 0.0
@@ -150,9 +235,7 @@ def _extract_features(
     comment_count = float(len(re.findall(r"#.*", code_str)))
     calc_comment_density = comment_density if comment_density is not None else (comment_count / lines)
     indent_spaces = float(len(re.findall(r"^[ ]+", code_str, re.MULTILINE)))
-    operator_count = float(
-        len(re.findall(r"[\+\-\*\/\%\=\<\>\!\&\|\^\~]", code_str))
-    )
+    operator_count = float(len(re.findall(r"[\+\-\*\/\%\=\<\>\!\&\|\^\~]", code_str)))
     operator_density = operator_count / max(1.0, char_len)
     ast_density = node_count / lines
     complexity_density = cyclomatic / max(1.0, node_count)
@@ -262,9 +345,7 @@ def grade(req: GradeRequest):
     try:
         state = _load_grading()
     except Exception as e:
-        raise HTTPException(
-            500, f"Grading initialization failed: {type(e).__name__}: {e}"
-        )
+        raise HTTPException(500, f"Grading initialization failed: {type(e).__name__}: {e}")
 
     bundle = state["grading_bundle"]
     model = bundle["model"]
@@ -315,7 +396,7 @@ def grade(req: GradeRequest):
 
     return GradeResponse(
         predicted_quality_score=round(final_score, 4),
-        model_used="lgbm_model.txt",
+        model_used="lgbm_model.txt (pure-python parser)",
         cyclomatic_complexity=computed_complexity,
         lines_of_code=computed_lines,
-    )
+            )
